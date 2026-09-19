@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.external" android:required="false" />
+
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      Wi-Fi multicast filtering normally drops the mDNS replies AdbDiscovery needs to find
+      Android's wireless-debugging services (_adb-tls-pairing._tcp / _adb-tls-connect._tcp).
+      Held briefly during each discovery; see AdbDiscovery.discover.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!--
+      The wireless-debugging "Pair device with a pairing code" dialog stops advertising its
+      mDNS service the moment it backgrounds. To pair without leaving the dialog, UxSpace
+      posts a notification with a RemoteInput field — the user types the code in the
+      notification shade *over* the dialog. Needs POST_NOTIFICATIONS on Android 13+.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!--
+      Granted once at first launch so the OS doesn't re-prompt every time a launched app
+      (e.g. a video-call client running on the workspace) tries to record audio.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+      WorkspaceService is a foreground service tied to the glasses USB session — it lets
+      UxSpace keep the workspace + launched apps alive while the phone screen is off, and
+      its onDestroy is the cleanup anchor that force-stops launched apps when the glasses
+      disconnect. `connectedDevice` is the Android 14+ FGS type for "driven by an external
+      device connection".
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!--
+      The in-app self-updater (AppUpdater) fetches its publish manifest + APK from the
+      self-hosted dist server over HTTPS, checks connectivity before trying, and hands the
+      downloaded APK to the system PackageInstaller. INTERNET / ACCESS_NETWORK_STATE cover
+      the fetch + the online() pre-check; REQUEST_INSTALL_PACKAGES lets UxSpace launch the
+      install of its own next version. See com.uxspace.update.AppUpdater.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
+      UxSpace lists the installed apps the user can launch onto a virtual screen, so it needs
+      to see other packages' launcher activities (Android 11+ package visibility).
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".UxSpaceApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/Theme.UxSpace">
+
+        <!-- Phone-side control panel: pick an app, see glasses status. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|density|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!--
+              Connecting the VITURE glasses launches UxSpace and, by virtue of receiving this
+              intent, grants it USB access to the glasses — so head tracking can read the IMU
+              without a separate, easily-missed permission prompt.
+            -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+
+        <!--
+          Receives the PrivilegedServer's Binder back from the shell-uid process. The server
+          (started via app_process under the embedded-ADB bootstrap, see docs/PRIVILEGE.md)
+          calls this provider, passing its Binder in a Bundle; the provider hands it to
+          PrivilegedService. exported=true so the shell-uid process can reach it; the call()
+          handler restricts callers to the shell or the app's own uid.
+        -->
+        <provider
+            android:name=".privileged.BinderReceiverProvider"
+            android:authorities="com.uxspace.privileged"
+            android:enabled="true"
+            android:exported="true" />
+
+        <!--
+          Catches the RemoteInput pairing code typed into PairingNotifier's notification.
+          Not exported — only UxSpace's own notification can deliver into it.
+        -->
+        <receiver
+            android:name=".privileged.PairingInputReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.uxspace.privileged.SUBMIT_PAIRING_CODE" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          Receives PackageInstaller session status for the in-app self-updater. On
+          STATUS_PENDING_USER_ACTION it launches the system's install-confirmation screen —
+          a non-privileged app can't install its own update without that final user tap.
+          Not exported: only the app's own PendingIntent delivers here.
+        -->
+        <receiver
+            android:name=".update.AppInstallReceiver"
+            android:exported="false" />
+
+        <!--
+          Workspace lifecycle anchor. Started by MainActivity when the glasses display
+          comes up; stopped when it goes away (or when the activity is destroyed). Its
+          onDestroy force-stops every app UxSpace launched into the workspace, so a
+          launched app never outlives the glasses session.
+        -->
+        <service
+            android:name=".WorkspaceService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!--
+          Accessibility service — subscribes to focus events so we can open the phone
+          keyboard whenever the user taps into a text field on one of the workspace's
+          virtual displays. Requires a one-time opt-in in Settings > Accessibility.
+        -->
+        <service
+            android:name=".UxSpaceAccessibilityService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+
+</manifest>

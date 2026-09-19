@@ -1,0 +1,45 @@
+*.iml
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+.captures/
+# Ad-hoc capture/debug PNGs pulled to the module root (capture, glasses, mouse, uw, screencap, …).
+_*.png
+playwright-*.png
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aar
+*.aab
+
+# Proprietary VITURE SDK — must NOT be committed or redistributed.
+# Download from https://www.viture.com/developer (kept outside the repo).
+/SDK/
+
+# Local infrastructure — self-hosted APK distribution. NEVER commit (this repo is public):
+# references internal server paths + a Cloudflare Access creds file. Backed up outside the
+# repo at D:\Work\Programming\UxSpace-infra-local\.
+/publish-uxspace.ps1
+/libs/viture-sdk/
+# VITURE SDK binaries/headers vendored into the :glasses module's native build.
+/glasses/src/main/jniLibs/
+/glasses/src/main/cpp/include/
+
+# Local Claude Code settings (machine-specific).
+.claude/settings.local.json
+
+# Pre-existing local files in this folder, unrelated to the project.
+history.db
+history.db-shm
+history.db-wal
+f02aa61-build/
+tools/ai-gateway/.env
+tools/hub/.env
+tools/hub/data/
+**/__pycache__/
+*.pyc
+.android-sdk/
