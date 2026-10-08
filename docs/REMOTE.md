@@ -23,6 +23,8 @@ do telefonu.
 
 | Rzecz | Jak działa |
 |---|---|
+| **Wykrywanie w Tailscale** | Hub czyta `tailscale status` na serwerze, pokazuje wszystkie urządzenia tailnetu, sprawdza porty i podpowiada rodzaj. „+ RDP” dodaje komputer jednym kliknięciem; opcja „Dodawaj sam każdy Windows z włączonym RDP” robi to bez Ciebie. |
+| **Telefon** | Zakładka **Ekrany** w GlassOS: stan Tailscale z przyciskiem Zaloguj / Otwórz, lista komputerów z zieloną kropką i przyciskami **1 / 2 / 3** — komputer wchodzi na wybrany ekran bez otwierania huba. |
 | **Komputer na ekranie** | Kafel „+ Komputer” w hubie. Telefon otwiera klienta na danym ekranie okularów od razu na pełnym monitorze 1920×1080, bez ramki okna. |
 | **Profil pulpitu** | Np. „Praca” = ekran 1 serwer firmowy (RDP), ekran 2 Twój PC (Moonlight), ekran 3 przeglądarka. Jeden klik **Włącz na okularach**. |
 | **Autostart** | Zaznacz „Włączaj ten pulpit sam, gdy podłączę okulary”. Telefon trzyma kopię profilu, więc działa też, gdy hub akurat nie odpowiada. |
@@ -100,8 +102,9 @@ panelu Tailscale → Access Controls.
 
 1. Ustawienia → System → Pulpit zdalny → **Włącz**.
 2. Tailscale na tym komputerze, zapamiętaj jego nazwę (np. `pc-praca`).
-3. W hubie: rodzaj **RDP**, host `pc-praca`, użytkownik Windows. Hasło wpiszesz raz w
-   Windows App na telefonie, zapamięta.
+3. W hubie w sekcji **Tailscale** komputer pojawi się sam z podpowiedzią RDP (port 3389
+   odpowiada) — kliknij **+ RDP**, potem **Edytuj** i wpisz użytkownika Windows. Hasło
+   wpiszesz raz w Windows App na telefonie, zapamięta. Ręcznie: rodzaj **RDP**, host `pc-praca`.
 
 ### Windows Home (i każdy PC do niskiego opóźnienia) — Sunshine + Moonlight
 
@@ -137,7 +140,9 @@ Serwer potrzebuje klienta `ssh` i klucza bez hasła do komputera. W hubie: rodza
    (za duży), więc po buildzie wrzuć `app/build/outputs/apk/debug/app-debug.apk` jako
    `tools/hub/static/GlassOS.apk` na serwer (`tools/hub/publish-apk.ps1` robi to na PC
    z buildem; na serwer skopiuj `GlassOS.apk` i `version.json` przez scp).
-2. Tailscale na telefonie, zalogowany do tego samego tailnetu, **włączony VPN**.
+2. Tailscale na telefonie, zalogowany do tego samego tailnetu, **włączony VPN**. GlassOS
+   pokazuje stan w nagłówku i w zakładce Ekrany; przycisk **Zaloguj** otwiera aplikację
+   Tailscale (GlassOS nie ma własnego VPN-a — Android dopuszcza jeden, i należy do Tailscale).
 3. Zakładka AI → Gateway = adres huba (`https://glassos-hub.<tailnet>.ts.net`).
 4. **Helper ADB** (Debugowanie bezprzewodowe, parowanie kodem) — potrzebny, żeby
    otwierać aplikacje na ekranach okularów. Robisz raz; po restarcie telefonu trzeba
@@ -218,6 +223,10 @@ Surowe dane: `GET /api/computers` (status portów), `GET /api/logs` (log telefon
 
 | Metoda | Ścieżka | Do czego |
 |---|---|---|
+| GET | `/api/tailscale` | urządzenia tailnetu z serwera huba: `online`, `os`, `ports`, `suggest`, `registered` |
+| POST | `/api/tailscale/add` | `{"dns":"pc-praca.tailnet.ts.net","kind":"rdp","user":"pawel"}` — dodaj wykryty komputer |
+| POST | `/api/tailscale/refresh` | odśwież `tailscale status` teraz |
+| POST | `/api/settings` | `{"auto_add_rdp":true}` — automatyczne dodawanie Windowsów z RDP |
 | GET | `/api/computers` | lista z `online` / `ms` |
 | POST | `/api/computers` | `{name, host, user, port, kind, mac, uuid, app}` |
 | PUT | `/api/computers/<id>` | edycja |

@@ -99,6 +99,8 @@ data class PhoneActions(
     val onVoice: () -> Unit,
     val onToggleLive: () -> Unit,
     val onApplyHubDesktop: (String) -> Unit,
+    val onOpenComputer: (com.uxspace.hub.HubComputer, Int) -> Unit,
+    val onOpenTailscale: () -> Unit,
     val onPair: (code: String, host: String, port: String) -> Unit,
     val onCheckUpdate: () -> Unit,
     val onSkipSetup: () -> Unit,
@@ -404,6 +406,7 @@ private fun Dashboard(state: PhonePanelState, actions: PhoneActions) {
         Spacer(Modifier.height(8.dp))
         LinkRow("Okulary", if (glassesOn) g?.modelName ?: "podłączone" else "niepodłączone — USB-C", glassesOn)
         LinkRow("Komputer", state.hubStatus.ifBlank { "szukam huba…" }, state.hubConnected)
+        LinkRow("Tailscale", state.tailscaleHint, state.tailscaleOn)
         LinkRow("Pulpit", state.workspaceHint.ifBlank { "czekam na okulary" }, state.workspaceOn)
         LinkRow("Głowa", state.trackingHint.ifBlank { "brak trackingu" }, state.dofActive)
         Spacer(Modifier.height(8.dp))
@@ -618,7 +621,84 @@ private fun WorkspacePane(state: PhonePanelState, actions: PhoneActions) {
         contentPadding = PaddingValues(bottom = 16.dp),
     ) {
         item {
-            Text("Z komputera", color = GlassMuted, fontSize = 12.sp)
+            Text("Komputery", color = GlassMuted, fontSize = 12.sp)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatusDot(state.tailscaleOn)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Tailscale: ${state.tailscaleHint}",
+                    color = if (state.tailscaleOn) GlassOk else GlassText,
+                    fontSize = 12.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                QuickToggle(
+                    when {
+                        !state.tailscaleInstalled -> "Zainstaluj"
+                        !state.tailscaleOn -> "Zaloguj"
+                        else -> "Otwórz"
+                    },
+                    false, true, actions.onOpenTailscale,
+                )
+            }
+        }
+        if (state.hubComputers.isEmpty()) {
+            item {
+                Text(
+                    if (state.hubConnected) "Hub nie ma jeszcze komputerów — dodaj je na stronie huba (sekcja Tailscale wykrywa je sama)."
+                    else "Lista komputerów przyjdzie z huba, gdy telefon go zobaczy.",
+                    color = GlassMuted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+        }
+        items(state.hubComputers, key = { "pc-" + it.id }) { comp ->
+            val screens = state.layout.screens.size.coerceIn(1, 3)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(GlassSurface)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatusDot(comp.online)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(comp.name, color = GlassText, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    Text(
+                        "${comp.kind.uppercase()} · ${comp.host}",
+                        color = GlassMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (i in 0 until screens) {
+                        Box(
+                            Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(GlassAccent.copy(alpha = 0.16f))
+                                .border(1.dp, GlassAccent, RoundedCornerShape(10.dp))
+                                .clickable { actions.onOpenComputer(comp, i) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("${i + 1}", color = GlassAccent, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Spacer(Modifier.height(8.dp))
+            Text("Pulpity z huba", color = GlassMuted, fontSize = 12.sp)
             Text(
                 state.hubStatus,
                 color = if (state.hubConnected) GlassOk else GlassMuted,

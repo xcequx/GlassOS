@@ -129,8 +129,21 @@ class HubClient(
         }
     }
 
+    private var tailscaleTick = 0
+
     /** Mirror the health lines onto the phone panel — same facts the hub checklist shows. */
     private fun refreshHealth() {
+        // Tailscale state every ~6 s: a quick interface scan, off the main thread.
+        if (tailscaleTick++ % 3 == 0) {
+            io.execute {
+                val snap = TailscaleStatus.probe(context)
+                main.post {
+                    panel.tailscaleInstalled = snap.installed
+                    panel.tailscaleOn = snap.connected
+                    panel.tailscaleHint = snap.hint
+                }
+            }
+        }
         val up = WorkspaceController.isRunning
         panel.workspaceOn = up
         panel.workspaceHint = when {
@@ -447,6 +460,11 @@ class HubClient(
             }
         }
         panel.statusLine = "pulpit: ${desk.name}"
+    }
+
+    /** Phone-side "→ screen N" button: open [comp] right now, no hub round trip. */
+    fun openComputer(comp: HubComputer, screenIdx: Int) {
+        main.post { launchComputer(comp, screenIdx) }
     }
 
     /** Open one registered computer as a full-slot monitor on [screenIdx]. */

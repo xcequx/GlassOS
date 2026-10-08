@@ -99,6 +99,7 @@ Zwykły HTTP na 30100, bez bazy. Stan w `tools/hub/data/state.json`.
 | GET | `/api/state` | pełny stan: pulpity, komputery, apki telefonu, czat |
 | GET | `/api/diag` · `/api/logs` | diagnostyka i log z telefonu |
 | POST | `/api/apply` | `{"id":"praca"}` — włącz pulpit |
+| GET/POST | `/api/tailscale`, `/api/tailscale/add` | urządzenia tailnetu z `tailscale status` na serwerze; dodanie wykrytego komputera |
 | GET/POST/PUT | `/api/computers`, `/api/computers/<id>` | komputery (RDP / Moonlight / VNC / SSH), `online` z sondy portu |
 | POST | `/api/computers/<id>/open` · `/wake` · `/delete` | komputer na ekran teraz · Wake-on-LAN · usuń |
 | POST | `/api/settings` | `{"autostart_desktop":"praca"}` — pulpit wchodzi sam po podłączeniu okularów |

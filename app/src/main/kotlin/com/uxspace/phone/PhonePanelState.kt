@@ -71,6 +71,10 @@ class PhonePanelState {
     var hubStatus by mutableStateOf("hub wyłączony")
     var hubDesktops by mutableStateOf<List<HubDesktop>>(emptyList())
     var hubComputers by mutableStateOf<List<HubComputer>>(emptyList())
+    /** Tailscale on the phone: app present, VPN up (100.x address). */
+    var tailscaleInstalled by mutableStateOf(false)
+    var tailscaleOn by mutableStateOf(false)
+    var tailscaleHint by mutableStateOf("sprawdzam…")
     /** Desktop id the hub wants applied automatically when the glasses come up ("" = none). */
     var hubAutostartDesktop by mutableStateOf("")
     var pairingNeeded by mutableStateOf(false)

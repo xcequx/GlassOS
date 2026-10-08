@@ -78,6 +78,8 @@ DEFAULT_STATE = {
         "default_layout": "TWO_SBS",
         # Desktop the phone applies by itself when the glasses connect ("" = off).
         "autostart_desktop": "",
+        # Register every Windows machine in the tailnet that answers on 3389 as RDP.
+        "auto_add_rdp": False,
     },
 }
 
@@ -316,6 +318,17 @@ def checks() -> list[dict]:
         "Opcjonalne. Potrzebne tylko po to, by odpalać apki telefonu na ekranach okularów: "
         "sparuj debugowanie bezprzewodowe albo uruchom tools/adb-helper.ps1 z PC.",
     )
+    ts_ok = bool(TS.get("ok")) and bool((TS.get("self") or {}).get("online", True))
+    peers = TS.get("peers") or []
+    add(
+        "tailscale",
+        "Tailscale na serwerze",
+        ts_ok,
+        (f"{(TS.get('self') or {}).get('dns') or (TS.get('self') or {}).get('name')} · "
+         f"{sum(1 for p in peers if p.get('online'))}/{len(peers)} urządzeń online") if ts_ok
+        else (TS.get("error") or "—"),
+        "Zainstaluj Tailscale na serwerze huba i zaloguj (tailscale up) — hub sam wykryje komputery w tailnecie.",
+    )
     ai_ok = bool(deepseek_key() or xai_key())
     add(
         "ai",
@@ -356,6 +369,13 @@ def status_payload() -> dict:
             {"id": c["id"], "online": c["online"], "ms": c["ms"]} for c in computers_with_status()
         ],
         "settings": STATE.get("settings") or {},
+        "tailscale": {
+            "ok": TS.get("ok"),
+            "error": TS.get("error"),
+            "self": TS.get("self"),
+            "at": TS.get("at"),
+            "discovered": discovered_peers(),
+        },
         "ai": {
             "deepseek": bool(deepseek_key()),
             "xai": bool(xai_key()),
@@ -518,6 +538,142 @@ def probe_loop() -> None:
             if ms is not None:
                 entry["seen"] = time.time()
         time.sleep(PROBE_INTERVAL_S)
+
+
+# ---- Tailscale: who is in the tailnet, straight from the local CLI (no API key) ----
+
+TS: dict = {"ok": False, "error": "nie sprawdzono", "self": {}, "peers": [], "at": 0.0}
+TS_INTERVAL_S = 20.0
+TS_CANDIDATES = [
+    "tailscale",
+    r"C:\Program Files\Tailscale\tailscale.exe",
+    "/usr/bin/tailscale",
+    "/usr/local/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+]
+
+
+def tailscale_bin() -> str | None:
+    import shutil
+    for cand in TS_CANDIDATES:
+        found = shutil.which(cand) if not os.path.isabs(cand) else (cand if os.path.exists(cand) else None)
+        if found:
+            return found
+    return None
+
+
+def host_matches(comp: dict, peer: dict) -> bool:
+    """Is this registered computer the same machine as this tailnet peer?"""
+    host = (comp.get("host") or "").strip().lower().rstrip(".")
+    if not host:
+        return False
+    names = {
+        (peer.get("dns") or "").lower(),
+        (peer.get("dns") or "").lower().split(".")[0],
+        (peer.get("name") or "").lower(),
+        (peer.get("ip") or "").lower(),
+    }
+    return host in names or host.split(".")[0] in names
+
+
+def refresh_tailscale() -> None:
+    """`tailscale status --json` → TS. Peers get a suggested kind from a quick port probe."""
+    binary = tailscale_bin()
+    if not binary:
+        TS.update({"ok": False, "error": "brak tailscale CLI na serwerze", "at": time.time()})
+        return
+    try:
+        proc = subprocess.run([binary, "status", "--json"], capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            TS.update({"ok": False, "error": (proc.stderr or proc.stdout).strip()[:200] or "tailscale status ✕", "at": time.time()})
+            return
+        data = json.loads(proc.stdout or "{}")
+    except Exception as exc:  # noqa: BLE001
+        TS.update({"ok": False, "error": str(exc)[:200], "at": time.time()})
+        return
+    me = data.get("Self") or {}
+    peers = []
+    for raw in (data.get("Peer") or {}).values():
+        dns = (raw.get("DNSName") or "").rstrip(".")
+        ips = raw.get("TailscaleIPs") or []
+        peers.append({
+            "name": raw.get("HostName") or dns.split(".")[0],
+            "dns": dns,
+            "ip": next((ip for ip in ips if "." in ip), ips[0] if ips else ""),
+            "os": (raw.get("OS") or "").lower(),
+            "online": bool(raw.get("Online")),
+            "ports": {},
+            "suggest": "",
+        })
+    # Which services answer — only for peers that are online, in parallel, short timeout.
+    def probe_peer(peer: dict) -> None:
+        host = peer["dns"] or peer["ip"]
+        for kind, port in KIND_PORTS.items():
+            peer["ports"][kind] = probe_port(host, port, timeout=1.2) is not None
+        # Windows: RDP first. Anything else: an open 3389 is rarer than ssh, so
+        # prefer the streaming / VNC / shell ports before guessing xrdp.
+        order = ["rdp", "moonlight", "vnc", "ssh"] if peer["os"] == "windows" else ["moonlight", "vnc", "ssh", "rdp"]
+        peer["suggest"] = next((k for k in order if peer["ports"].get(k)), "")
+    threads = [threading.Thread(target=probe_peer, args=(p,), daemon=True) for p in peers if p["online"]]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=6)
+    TS.update({
+        "ok": True,
+        "error": "",
+        "self": {
+            "name": me.get("HostName") or "",
+            "dns": (me.get("DNSName") or "").rstrip("."),
+            "ip": next((ip for ip in (me.get("TailscaleIPs") or []) if "." in ip), ""),
+            "online": bool(me.get("Online")),
+        },
+        "peers": peers,
+        "at": time.time(),
+    })
+    auto_register_rdp()
+
+
+def auto_register_rdp() -> None:
+    """With `auto_add_rdp` on, every Windows peer answering on 3389 becomes an RDP computer."""
+    with LOCK:
+        if not (STATE.get("settings") or {}).get("auto_add_rdp"):
+            return
+        comps = STATE.setdefault("computers", [])
+        added = 0
+        for peer in TS.get("peers") or []:
+            if not (peer.get("online") and peer.get("ports", {}).get("rdp")):
+                continue
+            if any(host_matches(c, peer) for c in comps):
+                continue
+            comps.append(norm_computer({"name": peer["name"], "host": peer["dns"] or peer["ip"], "kind": "rdp"}))
+            added += 1
+        if added:
+            save_state(STATE)
+
+
+def discovered_peers() -> list[dict]:
+    """Tailnet peers annotated with whether they are already on the computer list."""
+    out = []
+    comps = STATE.get("computers") or []
+    for peer in TS.get("peers") or []:
+        d = dict(peer)
+        match = next((c for c in comps if host_matches(c, peer)), None)
+        d["registered"] = match["id"] if match else ""
+        # The phone and the hub itself are not things you remote into.
+        d["skip"] = d["os"] in ("android", "ios") or (TS.get("self") or {}).get("dns") == d["dns"]
+        out.append(d)
+    out.sort(key=lambda d: (d["skip"], not d["online"], d["name"].lower()))
+    return out
+
+
+def tailscale_loop() -> None:
+    while True:
+        try:
+            refresh_tailscale()
+        except Exception as exc:  # noqa: BLE001
+            TS.update({"ok": False, "error": str(exc)[:200], "at": time.time()})
+        time.sleep(TS_INTERVAL_S)
 
 
 def computers_with_status() -> list[dict]:
@@ -736,6 +892,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/computers":
             with LOCK:
                 self._json(200, {"computers": computers_with_status()})
+            return
+        if path == "/api/tailscale":
+            with LOCK:
+                self._json(200, {"ok": TS.get("ok"), "error": TS.get("error"), "self": TS.get("self"),
+                                 "at": TS.get("at"), "discovered": discovered_peers()})
             return
         if path == "/api/state":
             with LOCK:
@@ -1091,6 +1252,35 @@ class Handler(BaseHTTPRequestHandler):
                 save_state(STATE)
             self._json(200, comp)
             return
+        if path == "/api/tailscale/refresh":
+            threading.Thread(target=refresh_tailscale, daemon=True).start()
+            self._json(200, {"ok": True})
+            return
+        if path == "/api/tailscale/add":
+            # Register a discovered tailnet peer as a computer, with the probed kind
+            # unless the browser picked one.
+            want = str(body.get("dns") or body.get("name") or "").lower()
+            peer = next((p for p in (TS.get("peers") or []) if want in ((p.get("dns") or "").lower(), (p.get("name") or "").lower())), None)
+            if not peer:
+                self._json(404, {"error": "nie ma takiego urządzenia w tailnecie"})
+                return
+            kind = str(body.get("kind") or peer.get("suggest") or ("rdp" if peer.get("os") == "windows" else "ssh"))
+            comp = norm_computer({
+                "name": body.get("label") or peer["name"],
+                "host": peer["dns"] or peer["ip"],
+                "kind": kind,
+                "user": body.get("user") or "",
+            })
+            with LOCK:
+                comps = STATE.setdefault("computers", [])
+                existing = next((c for c in comps if host_matches(c, peer)), None)
+                if existing:
+                    self._json(200, existing)
+                    return
+                comps.append(comp)
+                save_state(STATE)
+            self._json(200, comp)
+            return
         if path.startswith("/api/computers/") and path.endswith("/delete"):
             cid = path.split("/")[3]
             with LOCK:
@@ -1251,6 +1441,7 @@ def main() -> None:
     )
     print(f"  AI: {ai_label}")
     threading.Thread(target=probe_loop, name="probe", daemon=True).start()
+    threading.Thread(target=tailscale_loop, name="tailscale", daemon=True).start()
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 
 

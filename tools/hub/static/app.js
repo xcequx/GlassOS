@@ -171,6 +171,53 @@ function renderHosts() {
   });
 }
 
+/* ---------- tailscale: wykryte urządzenia ---------- */
+
+function renderTailscale(ts) {
+  ts = ts || {};
+  const list = (ts.discovered || []).filter((p) => !p.skip);
+  const online = list.filter((p) => p.online).length;
+  $("tsCount").textContent = list.length ? "(" + online + "/" + list.length + " online)" : "";
+  $("tsSelf").textContent = ts.ok
+    ? "Hub: " + (ts.self && (ts.self.dns || ts.self.name) || "?")
+    : "Tailscale na serwerze: " + (ts.error || "brak");
+  $("discovered").innerHTML = list.map((p) => {
+    const kind = p.suggest ? KIND_LABEL[p.suggest] : (p.online ? "nic nie odpowiada" : "offline");
+    const btn = p.registered
+      ? '<span class="hint">na liście</span>'
+      : (p.online
+        ? '<button class="mini accent" data-tsadd="' + esc(p.dns || p.name) + '" data-kind="' + esc(p.suggest || "") + '">+ ' + (p.suggest ? KIND_LABEL[p.suggest] : "dodaj") + "</button>"
+        : "");
+    return '<div class="host"><div style="flex:1;min-width:0">' +
+      '<div class="name"><span class="dot ' + (p.online ? "on" : "") + '"></span>' + esc(p.name) +
+        ' <span class="kind">' + esc(p.os) + "</span></div>" +
+      '<div class="hint">' + esc(p.dns || p.ip) + " · " + esc(kind) + "</div>" +
+      "</div>" + btn + "</div>";
+  }).join("") || '<div class="empty">' + (ts.ok ? "Brak innych urządzeń w tailnecie." : "Hub nie widzi Tailscale.") + "</div>";
+  $("discovered").querySelectorAll("[data-tsadd]").forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const kind = b.dataset.kind || "";
+        const user = kind === "rdp" ? ($("cUser").value || "") : "";
+        const c = await api("/api/tailscale/add", { method: "POST", body: JSON.stringify({ dns: b.dataset.tsadd, kind: kind, user: user }) });
+        S.host = c.id;
+        banner("");
+        $("hostHint").textContent = "Dodano " + c.name + " (" + KIND_LABEL[c.kind] + "). " +
+          (c.kind === "rdp" && !c.user ? "Uzupełnij użytkownika Windows przez Edytuj." : "");
+        await loadState();
+      } catch (e) { banner("Tailscale: " + e.message); b.disabled = false; }
+    };
+  });
+  $("autoRdp").checked = !!(S.settings && S.settings.auto_add_rdp);
+}
+$("autoRdp").onchange = async () => {
+  try {
+    S.settings = await api("/api/settings", { method: "POST", body: JSON.stringify({ auto_add_rdp: $("autoRdp").checked }) });
+    if ($("autoRdp").checked) await api("/api/tailscale/refresh", { method: "POST", body: "{}" });
+  } catch (e) { banner("Ustawienia: " + e.message); }
+};
+
 function syncKindFields() {
   const kind = $("cKind").value;
   $("moonFields").style.display = kind === "moonlight" ? "" : "none";
@@ -367,6 +414,8 @@ async function pollStatus() {
       if (c && (c.online !== p.online || c.ms !== p.ms)) { c.online = p.online; c.ms = p.ms; dotsChanged = true; }
     });
     if (dotsChanged && !S.editingHost) renderHosts();
+    if (st.settings) S.settings = st.settings;
+    renderTailscale(st.tailscale);
     $("aiHint").textContent = st.ai.model
       ? (st.ai.deepseek ? "DeepSeek " : "xAI ") + st.ai.model
       : "Brak klucza AI — wstaw DEEPSEEK_API_KEY do tools/hub/.env";

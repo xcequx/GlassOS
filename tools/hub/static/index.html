@@ -36,6 +36,16 @@
       </section>
 
       <section class="card">
+        <h2>TAILSCALE <span class="count" id="tsCount"></span></h2>
+        <div class="hint" id="tsSelf">—</div>
+        <div id="discovered"><div class="empty">…</div></div>
+        <label class="hint" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="autoRdp" />
+          Dodawaj sam każdy Windows z włączonym RDP
+        </label>
+      </section>
+
+      <section class="card">
         <h2>KOMPUTERY <span class="count" id="hostCount"></span></h2>
         <div id="hosts"></div>
         <select id="cKind" style="margin-bottom:8px">

@@ -398,6 +398,14 @@ class MainActivity : ComponentActivity() {
                     onVoice = { startVoice() },
                     onToggleLive = { ai.toggleLive() },
                     onApplyHubDesktop = { id -> hub.applyDesktop(id) },
+                    onOpenComputer = { comp, screenIdx ->
+                        if (!WorkspaceController.isRunning) {
+                            Toast.makeText(this, "Podłącz okulary", Toast.LENGTH_SHORT).show()
+                        } else {
+                            hub.openComputer(comp, screenIdx)
+                        }
+                    },
+                    onOpenTailscale = { com.uxspace.hub.TailscaleStatus.open(this) },
                     onCheckUpdate = { checkForAppUpdate(silent = false) },
                     onPair = { code, host, portText -> submitPairing(code, host, portText) },
                     onSkipSetup = { skipPrivilegeSetup() },
