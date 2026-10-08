@@ -109,6 +109,12 @@ class HeadTracking(
     @Volatile private var providesPosition = false
 
     /**
+     * True on the Gen1/2 host-IMU path, whose pose array carries NWU Euler degrees rather
+     * than an OpenGL quaternion. See [feedEulerPose].
+     */
+    @Volatile private var eulerPath = false
+
+    /**
      * Begin tracking: locate the glasses on USB and request permission. Idempotent — if
      * tracking is already up this is a no-op; if a previous call missed the device because
      * USB enumeration lagged behind the display, calling again retries. The expected retry
@@ -132,6 +138,7 @@ class HeadTracking(
             // genuine start() preserve the (spent) retry count instead of resetting it,
             // permanently disabling auto-retry for the session.
             autoRestartScheduled = false
+            GlassesStatus.fail("okulary nie widoczne na USB — sprawdź kabel / hub USB-C")
             Log.i(TAG, "no VITURE glasses found on USB — head tracking off (will retry on USB attach)")
             return
         }
@@ -170,6 +177,8 @@ class HeadTracking(
         pollThread = null
         worker.execute {
             synchronized(lifecycleLock) {
+                runCatching { hidImu?.stop() }
+                hidImu = null
                 runCatching { NativeGlasses.stopCarinaPollThread() }
                 runCatching { NativeGlasses.stop() }
                 runCatching { NativeGlasses.shutdown() }
@@ -183,27 +192,45 @@ class HeadTracking(
     }
 
     private fun onUsbDenied() {
+        GlassesStatus.fail("telefon nie dał zgody na dostęp do USB okularów")
         Log.w(TAG, "USB permission denied — head tracking off")
     }
 
+    private var hidImu: VitureHidImu? = null
+
     private fun onUsbOpened(device: UsbDevice, connection: UsbDeviceConnection) {
         this.connection = connection
-        val pid = device.productId
-        val fd = connection.fileDescriptor
-        worker.execute { startSdk(pid, fd) }
+        worker.execute { startTracking(device, connection) }
     }
 
-    /** Runs on [worker]: the SDK lifecycle, then the capability-specific tracking path. */
-    private fun startSdk(pid: Int, fd: Int) {
-        if (!NativeGlasses.libraryLoaded) {
-            Log.w(TAG, "glasses_bridge not loaded — head tracking off")
+    /** SDK if vendored; otherwise open Gen2 HID pose stream (Luma Pro). */
+    private fun startTracking(device: UsbDevice, connection: UsbDeviceConnection) {
+        val pid = device.productId
+        val fd = connection.fileDescriptor
+        val sdkOk = NativeGlasses.libraryLoaded &&
+            NativeGlasses.isSdkPresent() &&
+            NativeGlasses.create(pid, fd)
+        if (sdkOk) {
+            startSdkAfterCreate(pid)
             return
         }
-        Log.i(TAG, "libglasses ${runCatching { NativeGlasses.getVersion() }.getOrDefault("?")}")
-        if (!NativeGlasses.create(pid, fd)) {
-            Log.e(TAG, "NativeGlasses.create failed")
+        GlassesStatus.ok("bez SDK — awaryjny tryb HID 3DoF")
+        Log.i(TAG, "no proprietary libglasses.so — starting HID 3DoF for pid=0x${pid.toString(16)}")
+        val imu = VitureHidImu(connection, device) { w, x, y, z ->
+            firstPoseArrived = true
+            feedPose(w, x, y, z)
+        }
+        hidImu = imu
+        if (!imu.start()) {
+            GlassesStatus.fail("nie udało się otworzyć strumienia HID okularów")
+            Log.e(TAG, "HID IMU failed")
             return
         }
+        providesPosition = false
+        startPolling()
+    }
+
+    private fun startSdkAfterCreate(pid: Int) {
         val nativeDof = NativeGlasses.isProductSupportNativeDof(pid)
         val type = NativeGlasses.getDeviceType()
         val carina = type == NativeGlasses.DEVICE_TYPE_CARINA
@@ -224,8 +251,10 @@ class HeadTracking(
         // px,py,pz). In 3DOF — and on the native-DOF / Gen1/2 paths — those floats aren't a
         // usable world position, so we don't feed them and the camera stays at the origin.
         providesPosition = false
+        eulerPath = false
         when {
             nativeDof -> {
+                GlassesStatus.ok("3DoF · tracking w okularach (SDK)")
                 Log.i(TAG, "tracking path: native on-glasses DOF")
                 NativeGlasses.setupNativeDofDevice()
             }
@@ -236,10 +265,14 @@ class HeadTracking(
                         if (want6Dof) "— 6DOF, position/parallax on" else "— 3DOF, orientation only",
                 )
                 providesPosition = want6Dof
+                GlassesStatus.ok(if (want6Dof) "6DoF · Carina VIO (SDK)" else "3DoF · Carina (SDK)")
                 NativeGlasses.startCarinaPollThread()
             }
             else -> {
+                GlassesStatus.ok("3DoF · IMU przez SDK")
                 Log.i(TAG, "tracking path: Gen1/2 host IMU (deviceType=$type)")
+                // Gen1/2 reports Euler degrees in an NWU frame, not an OpenGL quaternion.
+                eulerPath = true
                 NativeGlasses.openImu()
             }
         }
@@ -263,12 +296,22 @@ class HeadTracking(
             while (polling) {
                 if (NativeGlasses.isPoseFresh()) {
                     val pose = NativeGlasses.getPose()
-                    // pose[3..6] is the orientation quaternion (w, x, y, z) for every device.
                     if (pose.size >= 7) {
                         firstPoseArrived = true
-                        feedPose(pose[3], pose[4], pose[5], pose[6])
-                        // pose[0..2] is the world position (px, py, pz) on Carina only.
-                        if (providesPosition) feedPosition(pose[0], pose[1], pose[2])
+                        if (eulerPath) {
+                            // Gen1/2: pose = [roll, pitch, yaw, qw, qx, qy, qz], degrees in
+                            // an NWU frame. Its quaternion is NOT in the OpenGL convention
+                            // the renderer expects — feeding it straight through permuted
+                            // the axes, so looking left moved the view up. VITURE's own
+                            // demo builds the camera from the Euler pair instead, and
+                            // leaves roll out entirely (level horizon); we do the same.
+                            feedEulerPose(pitchDeg = pose[1], yawDeg = pose[2])
+                        } else {
+                            // Carina / native-DOF: pose[3..6] is already an OpenGL quaternion.
+                            feedPose(pose[3], pose[4], pose[5], pose[6])
+                            // pose[0..2] is the world position (px, py, pz) on Carina only.
+                            if (providesPosition) feedPosition(pose[0], pose[1], pose[2])
+                        }
                     }
                 }
                 checkInitialPoseWatchdog()
@@ -304,6 +347,9 @@ class HeadTracking(
             // (or a USB re-attach) still works. Log once — guard so we don't spam.
             if (!autoRestartScheduled) {
                 autoRestartScheduled = true  // reuse as a latch to silence repeats
+                GlassesStatus.fail(
+                    "okulary nie oddają pozycji po $autoRetryCount próbach — odepnij i wepnij USB",
+                )
                 Log.w(
                     TAG,
                     "no first pose after $sinceMs ms and $autoRetryCount auto-retries — " +
@@ -340,6 +386,8 @@ class HeadTracking(
         polling = false
         pollThread?.interrupt()
         pollThread = null
+        runCatching { hidImu?.stop() }
+        hidImu = null
         runCatching { NativeGlasses.stopCarinaPollThread() }
         runCatching { NativeGlasses.stop() }
         runCatching { NativeGlasses.shutdown() }
@@ -367,9 +415,27 @@ class HeadTracking(
         val sinceMs = now - lastPoseAtMs
         if (sinceMs > STREAM_STALL_TIMEOUT_MS) {
             streaming = false
+            GlassesStatus.fail("strumień pozycji zamilkł (${sinceMs} ms bez danych)")
             Log.w(TAG, "pose stream stalled — no pose for ${sinceMs}ms (DOF lost)")
             runCatching { onStreamingChanged?.invoke(false) }
         }
+    }
+
+    /**
+     * Gen1/2 head pose from the SDK's Euler angles, converted to the renderer's OpenGL frame.
+     *
+     * Matching VITURE's reference renderer: GL yaw ψ = +yaw_nwu, GL pitch φ = −pitch_nwu,
+     * and no roll term, so the desktop stays level however the frames sit on your nose.
+     * q = R_y(ψ) ⊗ R_x(φ) = (cy·cx, cy·sx, sy·cx, −sy·sx).
+     */
+    private fun feedEulerPose(pitchDeg: Float, yawDeg: Float) {
+        val psi = yawDeg * DEG2RAD
+        val phi = -pitchDeg * DEG2RAD
+        val cy = kotlin.math.cos(psi * 0.5f)
+        val sy = kotlin.math.sin(psi * 0.5f)
+        val cx = kotlin.math.cos(phi * 0.5f)
+        val sx = kotlin.math.sin(phi * 0.5f)
+        feedPose(cy * cx, cy * sx, sy * cx, -sy * sx)
     }
 
     /** Recentre heading against the reference orientation, then deliver via [onPose]. */
@@ -377,6 +443,7 @@ class HeadTracking(
         lastPoseAtMs = System.currentTimeMillis()
         if (!streaming) {
             streaming = true
+            GlassesStatus.ok(GlassesStatus.tracking.substringBefore(" — ") + " — działa")
             Log.i(TAG, "pose stream live (DOF up)")
             runCatching { onStreamingChanged?.invoke(true) }
         }
@@ -451,5 +518,7 @@ class HeadTracking(
         /** Auto-restart attempts per user-initiated start before giving up and leaving
          *  recovery to a manual reconnect / USB re-attach. */
         const val MAX_AUTO_RETRIES = 3
+
+        const val DEG2RAD = 0.017453292f
     }
 }

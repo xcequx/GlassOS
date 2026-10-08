@@ -48,6 +48,12 @@ private const val RAW_MOUSE_WHEEL_GAIN = 0.08f
 /** Kernel mouse button codes. */
 private const val BTN_LEFT = 272
 private const val BTN_RIGHT = 273
+private const val BTN_MIDDLE = 274
+
+/** MotionEvent.BUTTON_* masks handed to the real-pointer path. */
+private const val BUTTON_PRIMARY = 1
+private const val BUTTON_SECONDARY = 2
+private const val BUTTON_TERTIARY = 4
 
 // Kernel KEY_* editing codes for the hardware-keyboard drawer-search path.
 private const val KEY_BACKSPACE = 14
@@ -115,6 +121,17 @@ class UxSpaceApp : Application() {
         }
         WorkspaceController.appLauncher = { displayId, packageName, activityName ->
             PrivilegedService.launchApp(displayId, packageName, activityName)
+        }
+        // Remote desktops / web pages: an intent (URI + extras) instead of a launcher entry.
+        WorkspaceController.intentLauncher = { displayId, packageName, activityName, intent ->
+            PrivilegedService.launchIntent(
+                displayId, packageName, activityName, intent.action, intent.dataUri, intent.extras,
+            )
+        }
+        // Real pointer into an app window (hover + buttons) — what makes a remote
+        // desktop client forward right-click and drag to the far machine.
+        WorkspaceController.appMouse = { displayId, x, y, action, buttons ->
+            PrivilegedService.injectMouse(displayId, x, y, action, buttons)
         }
         WorkspaceController.appTap = { displayId, x, y ->
             // Use the same InputManager.injectInputEvent path as the drag — `input tap`
@@ -233,6 +250,9 @@ class UxSpaceApp : Application() {
         // the trackpad's "full sweep ≈ one screen" feel; cursorSensitivity
         // multiplies on top in WorkspaceController.moveCursor.
         PrivilegedService.mouseDeltaHandler = { dx, dy, wheel ->
+            // Lets the renderer stream hover frames to the app under the cursor —
+            // only while a real mouse / touchpad is moving, never for the phone trackpad.
+            WorkspaceController.notePhysicalMouse()
             if (dx != 0 || dy != 0) {
                 // First motion while the primary button is held — fire beginDrag
                 // BEFORE applying the delta to the cursor. The renderer's
@@ -256,7 +276,25 @@ class UxSpaceApp : Application() {
             }
         }
 
-        PrivilegedService.mouseButtonHandler = { code, pressed ->
+        PrivilegedService.mouseButtonHandler = handler@{ code, pressed ->
+            val mask = when (code) {
+                BTN_LEFT -> BUTTON_PRIMARY
+                BTN_RIGHT -> BUTTON_SECONDARY
+                BTN_MIDDLE -> BUTTON_TERTIARY
+                else -> 0
+            }
+            // Over an app window the button is a real pointer button for that app
+            // (press captures the window until release). Only when the renderer
+            // declines — desktop, chrome, modal — does the workspace click / drag
+            // / context-menu path below run.
+            val toApp = mask != 0 && WorkspaceController.mouseButton(mask, pressed)
+            if (toApp) {
+                if (code == BTN_LEFT) {
+                    mousePrimaryDown = false
+                    mouseDragging = false
+                }
+                return@handler
+            }
             when (code) {
                 BTN_LEFT -> handleMousePrimary(pressed)
                 // Right-click opens the desktop context menu (Arrange icons,
@@ -443,6 +481,7 @@ class UxSpaceApp : Application() {
         WorkspaceController.maxWindowsPerSlot = WorkspaceSettings.maxWindowsPerSlot()
         WorkspaceController.snapZonesEnabled = WorkspaceSettings.snapZonesEnabled()
         WorkspaceController.resizeHandlesEnabled = WorkspaceSettings.resizeHandlesEnabled()
+        WorkspaceController.pointerToAppsEnabled = WorkspaceSettings.pointerToAppsEnabled()
         WorkspaceController.recordingFrameInterval = WorkspaceSettings.recordingFrameInterval()
         WorkspaceController.captureDebugOverlay = WorkspaceSettings.captureDebugOverlay()
         WorkspaceController.appDisplayDpi = WorkspaceSettings.appDisplayDpi()

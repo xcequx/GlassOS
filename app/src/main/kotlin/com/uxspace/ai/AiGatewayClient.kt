@@ -109,6 +109,13 @@ class AiGatewayClient {
         private const val TAG = "GlassOS/AI"
         const val LAN_URL = "http://192.168.1.112:30100"
         const val TAILSCALE_URL = "https://desktop-sotkr5k.tail37a666.ts.net"
+
+        /**
+         * Same hub over the tailnet, but by raw IP and plain HTTP. `tailscale serve`
+         * needs MagicDNS + the HTTPS proxy to be healthy on both ends; this path only
+         * needs the tunnel itself, so it survives the DNS half being down.
+         */
+        const val TAILSCALE_IP_URL = "http://100.97.64.122:30100"
         const val DEFAULT_URL = TAILSCALE_URL
         const val PREF = "glassos_ai"
         const val PREF_URL = "gateway_url"

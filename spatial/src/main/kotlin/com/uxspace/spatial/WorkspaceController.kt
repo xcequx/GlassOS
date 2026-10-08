@@ -53,6 +53,59 @@ object WorkspaceController {
     var appLauncher: ((displayId: Int, packageName: String, activityName: String) -> Unit)? = null
 
     /**
+     * How to open a window that is not a plain launcher entry: an action + data URI
+     * (`rdp://…`, `vnc://…`, `https://…`) plus optional "key=value" string extras.
+     * Package / activity may be blank — the system resolves the URI like a tapped link.
+     */
+    data class LaunchIntent(
+        val action: String = "android.intent.action.VIEW",
+        val dataUri: String = "",
+        val extras: List<String> = emptyList(),
+    )
+
+    /** Launches an intent onto a virtual display (remote desktops, web pages). Set by the app. */
+    @Volatile
+    var intentLauncher: (
+        (displayId: Int, packageName: String, activityName: String, intent: LaunchIntent) -> Unit
+    )? = null
+
+    /**
+     * Real mouse pointer into a launched app's display. `action`: 0 hover, 1 press,
+     * 2 release, 3 move-while-held; `buttons` is a MotionEvent.BUTTON_* mask. A remote
+     * desktop client forwards these as genuine left / right / middle clicks and drags.
+     * Set by the app at startup.
+     */
+    @Volatile
+    var appMouse: ((displayId: Int, x: Int, y: Int, action: Int, buttons: Int) -> Unit)? = null
+
+    /**
+     * When true, a physical mouse over an app window drives the app with real pointer
+     * events (hover + buttons) instead of synthesized taps. Off = legacy tap behaviour.
+     */
+    @Volatile
+    var pointerToAppsEnabled: Boolean = true
+
+    /** Where the mouse pointer currently sits inside an app window, in that app's display pixels. */
+    data class PointerTarget(val displayId: Int, val x: Int, val y: Int, val packageName: String)
+
+    /** The app window under the pointer right now, or null (desktop, chrome, modal, no window). */
+    fun pointerTarget(): PointerTarget? = renderer?.pointerTarget
+
+    /**
+     * A physical mouse button went down / up. Returns true when the event was
+     * delivered to an app window as a real pointer button (the caller must then not
+     * treat it as a workspace click / drag); false when the pointer is over the
+     * desktop and the legacy click path should run.
+     */
+    fun mouseButton(buttons: Int, pressed: Boolean): Boolean =
+        renderer?.mouseButton(buttons, pressed) ?: false
+
+    /** Mark that a physical mouse / touchpad is driving the cursor (enables hover streaming). */
+    fun notePhysicalMouse() {
+        renderer?.notePhysicalMouse()
+    }
+
+    /**
      * Creates a *trusted* virtual display rendering into the given surface and returns its id
      * (or `null` on failure). A trusted display is created through Shizuku's shell-uid helper;
      * it is what lets a launched app keep its splash-screen / new-task launches on the
@@ -119,6 +172,37 @@ object WorkspaceController {
      */
     @Volatile
     var retryHeadTracking: (() -> Unit)? = null
+
+    /**
+     * Full glasses recovery — helper, display, Presentation, head tracking. Wired by
+     * [com.uxspace.MainActivity]; called from the phone panel and from the hub's
+     * "Restart pulpitu" button, which is the remote version of unplugging the cable.
+     */
+    @Volatile
+    var restartGlasses: (() -> Unit)? = null
+
+    /** 2D / 3D switch with the link watchdog. Wired by [com.uxspace.MainActivity]. */
+    @Volatile
+    var setStereo: ((Boolean) -> Unit)? = null
+
+    /** Show or hide the glasses taskbar. Wired by [com.uxspace.MainActivity]. */
+    @Volatile
+    var setTaskbarVisible: ((Boolean) -> Unit)? = null
+
+    /** True only when the ADB helper can create trusted virtual displays for 3rd-party apps. */
+    @Volatile var privilegedReady: Boolean = false
+        set(value) {
+            val became = value && !field
+            field = value
+            // The helper usually arrives a beat after the first layout. Screens created
+            // before that are untrusted, and an untrusted screen renders other apps'
+            // windows as blank — the "ekrany są puste / ikony nie klikają" state. Rebuild
+            // them the moment trusted displays become possible.
+            if (became) {
+                val r = renderer
+                if (r != null && r.hasUntrustedScreens()) r.rebuildScreens()
+            }
+        }
 
     /**
      * Trigger a manual in-app update check. Wired by [com.uxspace.MainActivity] (the updater's
@@ -370,6 +454,26 @@ object WorkspaceController {
     /** The current view mode — pinned to the head, or free in the world. */
     val currentViewMode: WorkspaceRenderer.ViewMode get() = viewMode
 
+    /** True once the user has deliberately pinned the screen to their head. */
+    @Volatile
+    private var pinnedByUser: Boolean = false
+
+    /**
+     * Head tracking just came up: leave PINNED unless the user asked for it.
+     *
+     * PINNED renders a single screen glued to the head, so with a tracker running it turns
+     * every head movement into "the picture just rotates" and hides the second and third
+     * screen of the chosen layout. FREE is what multi-screen work actually looks like, so
+     * that is where a tracking session starts.
+     */
+    fun autoUnlockOnTracking() {
+        if (pinnedByUser) return
+        if (viewMode != WorkspaceRenderer.ViewMode.PINNED) return
+        android.util.Log.i("UxSpace/DOF", "tracking live — przechodzę w tryb FREE (${layoutState})")
+        setViewMode(WorkspaceRenderer.ViewMode.FREE)
+        announceInView("Ekrany w przestrzeni — rozglądaj się", 3_000L)
+    }
+
     /**
      * The layout actually rendered right now. PINNED mode always shows a single display
      * (focus mode); FREE mode shows the user's chosen layout. [layoutState] holds the
@@ -410,14 +514,24 @@ object WorkspaceController {
         activityName: String,
         label: String,
         screenIdx: Int? = null,
+        intent: LaunchIntent? = null,
+        monitor: Boolean = false,
     ): Boolean {
         val current = renderer
         android.util.Log.i(
             "UxSpace/Launch",
-            "2) controller.launchApp pkg=$packageName slot=$screenIdx running=${current != null}",
+            "2) controller.launchApp pkg=$packageName slot=$screenIdx running=${current != null} " +
+                "intent=${intent?.dataUri?.take(60)} monitor=$monitor",
         )
         if (current == null) return false
-        current.requestApp(packageName, activityName, label, screenIdx)
+        if (createVirtualDisplay == null || !privilegedReady) {
+            android.util.Log.w(
+                "UxSpace/Launch",
+                "launchApp skipped — no trusted displays (ADB helper not READY)",
+            )
+            return false
+        }
+        current.requestApp(packageName, activityName, label, screenIdx, intent, monitor)
         synchronized(recentAppsList) {
             recentAppsList.remove(packageName)
             recentAppsList.add(0, packageName)
@@ -939,7 +1053,8 @@ object WorkspaceController {
      * Closes the drawer if it was open — switching modes makes the previous drawer's
      * anchor screen meaningless.
      */
-    fun setViewMode(mode: WorkspaceRenderer.ViewMode) {
+    fun setViewMode(mode: WorkspaceRenderer.ViewMode, byUser: Boolean = false) {
+        if (byUser) pinnedByUser = mode == WorkspaceRenderer.ViewMode.PINNED
         if (viewMode == mode) return
         viewMode = mode
         if (drawerOpenState) setDrawerOpen(false)
@@ -1339,6 +1454,23 @@ object WorkspaceController {
     fun resetLook() {
         renderer?.resetLook()
         renderer?.setWorkspaceZoom(1f)
+    }
+
+    /**
+     * Frame the whole layout: zoom out far enough that every screen of the current layout
+     * is in view, and recentre. "Nie widzę drugiego ekranu" has one honest answer — the
+     * camera is too close — and this is the one-button version of that answer.
+     */
+    fun fitAllScreens() {
+        val screens = effectiveLayout().screens.size.coerceAtLeast(1)
+        val zoom = when {
+            screens >= 3 -> 0.55f
+            screens == 2 -> 0.75f
+            else -> 1.0f
+        }
+        renderer?.setWorkspaceZoom(zoom)
+        resetLook()
+        announceInView("Widok na $screens " + (if (screens == 1) "ekran" else "ekrany"), 2_500L)
     }
 
     fun zoomBy(factor: Float) {

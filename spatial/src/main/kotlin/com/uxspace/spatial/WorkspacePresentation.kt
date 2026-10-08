@@ -2,8 +2,13 @@ package com.uxspace.spatial
 
 import android.app.Presentation
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.Display
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import com.uxspace.glasses.HeadTracking
 
@@ -24,10 +29,18 @@ class WorkspacePresentation(
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Window flags are safe before the decor exists; the insets controller is not
+        // (PhoneWindow.getInsetsController() dereferences mDecor). So: flags here,
+        // system bars after setContentView.
+        window?.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        )
         val view = WorkspaceSurfaceView(context)
         surfaceView = view
         setContentView(view)
+        hideSystemBars()
         WorkspaceController.register(view.workspaceRenderer)
         // The screen-fill (render band) comes from the user's persisted setting, pushed into
         // the controller by the app and re-applied here by register() → setScreenBand. Default
@@ -60,6 +73,39 @@ class WorkspacePresentation(
     override fun onStart() {
         super.onStart()
         surfaceView?.onResume()
+        hideSystemBars()
+    }
+
+    /**
+     * Glasses display must not show a second Android nav/status bar under the workspace.
+     *
+     * Only call this once the content view exists — before that the window has no decor and
+     * `insetsController` throws. Cosmetics must never take the workspace down with them, so
+     * the whole thing is wrapped: a visible nav bar is a nuisance, a dead Presentation is
+     * the difference between a working pair of glasses and a black screen.
+     */
+    private fun hideSystemBars() {
+        val w = window ?: return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                w.setDecorFitsSystemWindows(false)
+                w.insetsController?.let { c ->
+                    c.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                    c.systemBarsBehavior =
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                w.decorView.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    )
+            }
+        }.onFailure { Log.w(TAG, "nie udało się schować pasków systemowych: ${it.message}") }
     }
 
     /**
@@ -112,5 +158,9 @@ class WorkspacePresentation(
         }
         surfaceView = null
         super.dismiss()
+    }
+
+    private companion object {
+        const val TAG = "UxSpace/Presentation"
     }
 }

@@ -23,6 +23,7 @@ Sterujesz pulpitami okularów przez narzędzia:
 - rename_desktop: nazwij okno
 - remember: zapisz fakt o użytkowniku / pracy
 - open_remote: otwórz komputer SSH/RDP po id
+Komputery (RDP / Moonlight / VNC) wchodzą na ekrany jako type "remote" z hostId z listy komputerów — jeden komputer = jeden pełny monitor.
 - list_files: pokaż ostatnie pliki z pulpitu PC
 Nie obiecuj rzeczy, których nie możesz zrobić. Jeśli brakuje danych, zapytaj jednym zdaniem.
 """

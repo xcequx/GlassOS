@@ -85,6 +85,7 @@ data class PhoneActions(
     val onBrightness: (Int) -> Unit,
     val onFilm: (Float) -> Unit,
     val onToggle3d: () -> Unit,
+    val onToggleTaskbar: () -> Unit,
     val onKeyboard: () -> Unit,
     val onHome: () -> Unit,
     val onImeText: (String) -> Unit,
@@ -244,7 +245,9 @@ private fun WaitingScene() {
 @Composable
 private fun ControlScene(state: PhonePanelState, actions: PhoneActions) {
     Column(Modifier.fillMaxSize()) {
-        Dashboard(state, actions)
+        // One thin line of state instead of the old half-screen dashboard — the pad is
+        // the tool you actually hold, so it gets the space. Tap the strip for details.
+        StatusStrip(state) { state.tab = ControlTab.SETTINGS }
         Box(
             Modifier
                 .weight(1f)
@@ -255,10 +258,136 @@ private fun ControlScene(state: PhonePanelState, actions: PhoneActions) {
                 ControlTab.APPS -> AppsPane(state, actions)
                 ControlTab.WORKSPACE -> WorkspacePane(state, actions)
                 ControlTab.AI -> AiPane(state, actions)
+                ControlTab.SETTINGS -> SettingsPane(state, actions)
             }
         }
-        QuickBar(state, actions)
+        // Only the pad gets the quick row. Elsewhere it was a permanent bar nobody
+        // asked for — and an easy place to hit 2D/3D by accident.
+        if (state.tab == ControlTab.TOUCHPAD) QuickBar(state, actions)
         BottomNav(state)
+    }
+}
+
+@Composable
+private fun StatusStrip(state: PhonePanelState, onOpen: () -> Unit) {
+    val g = state.glasses
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "GLASSOS",
+            color = GlassAccent,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 2.sp,
+            fontSize = 11.sp,
+        )
+        StatusDot("okulary", g?.connected == true)
+        StatusDot("hub", state.hubConnected)
+        StatusDot("pulpit", state.workspaceOn)
+        StatusDot("glowa", state.dofActive)
+        Spacer(Modifier.weight(1f))
+        Text(
+            "ustawienia",
+            color = GlassMuted,
+            fontSize = 11.sp,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
+@Composable
+private fun StatusDot(label: String, on: Boolean) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(if (on) GlassAccent else Color(0xFF55606F)),
+        )
+        Text(label, color = if (on) GlassText else GlassMuted, fontSize = 11.sp)
+    }
+}
+
+/** Everything that used to crowd the top of every tab, in one scrollable place. */
+@Composable
+private fun SettingsPane(state: PhonePanelState, actions: PhoneActions) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+    ) {
+        Dashboard(state, actions)
+        if (state.brightness >= 0) {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                Text("OKULARY", color = GlassMuted, fontSize = 11.sp, letterSpacing = 1.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Jasnosc", color = GlassMuted, fontSize = 12.sp, modifier = Modifier.width(84.dp))
+                    Slider(
+                        value = state.brightness.toFloat(),
+                        onValueChange = { actions.onBrightness(it.toInt()) },
+                        valueRange = 0f..8f,
+                        steps = 7,
+                        modifier = Modifier.weight(1f),
+                        colors = SliderDefaults.colors(thumbColor = GlassAccent, activeTrackColor = GlassAccent),
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Przyciemn.", color = GlassMuted, fontSize = 12.sp, modifier = Modifier.width(84.dp))
+                    Slider(
+                        value = state.filmPercent,
+                        onValueChange = { actions.onFilm(it) },
+                        valueRange = 0f..100f,
+                        modifier = Modifier.weight(1f),
+                        colors = SliderDefaults.colors(thumbColor = GlassAccent, activeTrackColor = GlassAccent),
+                    )
+                }
+            }
+        }
+        Column(Modifier.padding(horizontal = 16.dp)) {
+            Text("WIDOK", color = GlassMuted, fontSize = 11.sp, letterSpacing = 1.sp)
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                QuickToggle(
+                    if (state.taskbarVisible) "Pasek zadan: wl." else "Pasek zadan: wyl.",
+                    state.taskbarVisible,
+                    enabled = true,
+                    onClick = actions.onToggleTaskbar,
+                )
+                QuickToggle(
+                    if (state.stereo3d) "Obraz: 3D" else "Obraz: 2D",
+                    state.stereo3d,
+                    enabled = true,
+                    onClick = actions.onToggle3d,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Zmiana 2D/3D przelacza tryb wideo okularow. Jesli obraz nie wroci w kilka " +
+                    "sekund, GlassOS sam wraca do 1080p60.",
+                color = GlassMuted,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+            )
+        }
+        Text(
+            "Helper ADB uruchamia aplikacje telefonu na ekranach okularow. Bez niego " +
+                "pulpit, poczta, strony i SSH dzialaja normalnie.",
+            color = GlassMuted,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+        )
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -275,6 +404,8 @@ private fun Dashboard(state: PhonePanelState, actions: PhoneActions) {
         Spacer(Modifier.height(8.dp))
         LinkRow("Okulary", if (glassesOn) g?.modelName ?: "podłączone" else "niepodłączone — USB-C", glassesOn)
         LinkRow("Komputer", state.hubStatus.ifBlank { "szukam huba…" }, state.hubConnected)
+        LinkRow("Pulpit", state.workspaceHint.ifBlank { "czekam na okulary" }, state.workspaceOn)
+        LinkRow("Głowa", state.trackingHint.ifBlank { "brak trackingu" }, state.dofActive)
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = state.aiGatewayUrl,
@@ -571,31 +702,6 @@ private fun QuickBar(state: PhonePanelState, actions: PhoneActions) {
             .background(GlassSurface)
             .padding(12.dp),
     ) {
-        if (state.brightness >= 0) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Jasność", color = GlassMuted, fontSize = 12.sp, modifier = Modifier.width(72.dp))
-                Slider(
-                    value = state.brightness.toFloat(),
-                    onValueChange = { actions.onBrightness(it.toInt()) },
-                    valueRange = 0f..8f,
-                    steps = 7,
-                    modifier = Modifier.weight(1f),
-                    colors = SliderDefaults.colors(thumbColor = GlassAccent, activeTrackColor = GlassAccent),
-                )
-                Text("${(state.brightness * 12.5f).toInt()}%", color = GlassText, fontSize = 12.sp, modifier = Modifier.width(40.dp))
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Przyciemn.", color = GlassMuted, fontSize = 12.sp, modifier = Modifier.width(72.dp))
-                Slider(
-                    value = state.filmPercent,
-                    onValueChange = { actions.onFilm(it) },
-                    valueRange = 0f..100f,
-                    modifier = Modifier.weight(1f),
-                    colors = SliderDefaults.colors(thumbColor = GlassAccent, activeTrackColor = GlassAccent),
-                )
-                Text("${state.filmPercent.toInt()}%", color = GlassText, fontSize = 12.sp, modifier = Modifier.width(40.dp))
-            }
-        }
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -603,7 +709,6 @@ private fun QuickBar(state: PhonePanelState, actions: PhoneActions) {
             QuickToggle("3DoF", !state.viewModePinned, enabled = true, onClick = actions.onToggleViewMode)
             QuickToggle("Head", state.headCursor, enabled = true, onClick = actions.onToggleHeadCursor)
             QuickToggle("Recenter", false, enabled = true, onClick = actions.onRecenter)
-            QuickToggle(if (state.stereo3d) "3D" else "2D", state.stereo3d, enabled = true, onClick = actions.onToggle3d)
             QuickToggle("Klaw.", state.keyboardVisible, enabled = true, onClick = actions.onKeyboard)
         }
     }
@@ -645,6 +750,9 @@ private fun BottomNav(state: PhonePanelState) {
         NavItem("Pad", state.tab == ControlTab.TOUCHPAD, Modifier.weight(1f)) { state.tab = ControlTab.TOUCHPAD }
         NavItem("Ekrany", state.tab == ControlTab.WORKSPACE, Modifier.weight(1f)) { state.tab = ControlTab.WORKSPACE }
         NavItem("AI", state.tab == ControlTab.AI, Modifier.weight(1f)) { state.tab = ControlTab.AI }
+        NavItem("Ustaw.", state.tab == ControlTab.SETTINGS, Modifier.weight(1f)) {
+            state.tab = ControlTab.SETTINGS
+        }
     }
 }
 

@@ -732,6 +732,12 @@ class SettingsView(context: Context) : LinearLayout(context) {
                 current = WorkspaceSettings.resizeHandlesEnabled(),
             ) { WorkspaceSettings.setResizeHandlesEnabled(it) },
         )
+        addView(
+            backedToggleRow(
+                label = "Mouse as real pointer in apps (RDP / Moonlight)",
+                current = WorkspaceSettings.pointerToAppsEnabled(),
+            ) { WorkspaceSettings.setPointerToAppsEnabled(it) },
+        )
     }
 
     /** Snap a raw slider value to the nearest [WorkspaceSettings.APP_DISPLAY_DPI_STEP]. */

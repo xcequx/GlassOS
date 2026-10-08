@@ -1,0 +1,38 @@
+{
+  "// 1": "Przykład ACL dla GlassOS. Wklej w panelu Tailscale -> Access Controls i dopasuj tagi / użytkownika.",
+  "// 2": "Telefon dociera do komputerów tylko na porty zdalnego pulpitu; wszyscy docierają do huba; nic więcej.",
+  "tagOwners": {
+    "tag:glassos-hub": ["autogroup:admin"],
+    "tag:glassos-pc": ["autogroup:admin"],
+    "tag:glassos-phone": ["autogroup:admin"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["tag:glassos-phone", "autogroup:member"],
+      "dst": ["tag:glassos-hub:30100", "tag:glassos-hub:443"]
+    },
+    {
+      "action": "accept",
+      "src": ["tag:glassos-phone"],
+      "dst": [
+        "tag:glassos-pc:3389",
+        "tag:glassos-pc:47984-47990",
+        "tag:glassos-pc:47998-48010",
+        "tag:glassos-pc:5900",
+        "tag:glassos-pc:22"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": ["tag:glassos-hub"],
+      "dst": ["tag:glassos-pc:3389", "tag:glassos-pc:47989", "tag:glassos-pc:5900", "tag:glassos-pc:22"]
+    },
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self:*"]
+    }
+  ],
+  "// 3": "Moonlight: 47984/47989/47990 TCP (HTTP/HTTPS/RTSP), 47998-48010 UDP (video/audio/control). Zwykła ACL Tailscale obejmuje oba protokoły."
+}

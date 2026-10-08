@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.uxspace.apps.InstalledApp
+import com.uxspace.hub.HubComputer
 import com.uxspace.hub.HubDesktop
 import com.uxspace.glasses.GlassesSnapshot
 import com.uxspace.glasses.TrackingKind
@@ -14,7 +15,7 @@ import com.uxspace.spatial.Layout
 
 enum class PanelScene { SETUP, WAITING, CONTROL }
 
-enum class ControlTab { TOUCHPAD, APPS, WORKSPACE, AI }
+enum class ControlTab { TOUCHPAD, APPS, WORKSPACE, AI, SETTINGS }
 
 enum class WorkspacePreset(val label: String, val hint: String) {
     FOCUS("Focus", "Jeden ekran przyklejony do głowy"),
@@ -48,6 +49,7 @@ class PhonePanelState {
     var brightness by mutableIntStateOf(-1)
     var filmPercent by mutableFloatStateOf(0f)
     var stereo3d by mutableStateOf(false)
+    var taskbarVisible by mutableStateOf(true)
     var statusLine by mutableStateOf("")
     var cameraUsb by mutableStateOf(false)
     var cameraLabel by mutableStateOf("kamera: —")
@@ -61,9 +63,16 @@ class PhonePanelState {
     var aiAnswer by mutableStateOf("")
     var aiFramesSent by mutableIntStateOf(0)
     var aiLive by mutableStateOf(false)
+    /** Workspace + tracking health, mirrored from the diagnostics the hub also gets. */
+    var workspaceOn by mutableStateOf(false)
+    var workspaceHint by mutableStateOf("")
+    var trackingHint by mutableStateOf("")
     var hubConnected by mutableStateOf(false)
     var hubStatus by mutableStateOf("hub wyłączony")
     var hubDesktops by mutableStateOf<List<HubDesktop>>(emptyList())
+    var hubComputers by mutableStateOf<List<HubComputer>>(emptyList())
+    /** Desktop id the hub wants applied automatically when the glasses come up ("" = none). */
+    var hubAutostartDesktop by mutableStateOf("")
     var pairingNeeded by mutableStateOf(false)
     var skipPrivilege by mutableStateOf(true)
     var updateStatus by mutableStateOf("")

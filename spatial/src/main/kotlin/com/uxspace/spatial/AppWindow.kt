@@ -55,6 +55,18 @@ class AppWindow(
     var slotIdx: Int,
     /** Height of the chrome strip at the top of the window, in slot-local pixels. */
     val chromePx: Int,
+    /**
+     * Non-null when the activity was opened from an intent (remote desktop, web
+     * page) rather than its launcher entry — a relaunch (slot move, layout restore)
+     * must replay the same intent or the app opens on its home screen instead.
+     */
+    val intent: WorkspaceController.LaunchIntent? = null,
+    /**
+     * "Monitor" window: opened straight into FULLSCREEN on a bare display sized to
+     * the whole slot, so a remote desktop client sees the slot's native 1920×1080
+     * and maps 1:1 onto the glasses screen.
+     */
+    val monitor: Boolean = false,
 ) {
     /** Outer window bounds in slot-local pixel coords. Updated by [bind]. */
     var xPx: Int = 0

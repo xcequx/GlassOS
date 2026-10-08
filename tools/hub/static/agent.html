@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GlassOS Agent</title>
+  <style>
+    /* Ta strona ma być czytana z okularów, z metra od oczu — stąd duży krój,
+       mocny kontrast i jedna kolumna. Ten sam plik działa na telefonie i na PC. */
+    :root {
+      --bg: #080b11; --panel: #141a24; --line: #2a3344; --text: #eef3fa;
+      --muted: #93a0b4; --accent: #5ee0f7; --ok: #7cffb2; --warn: #ffd479; --bad: #ff8a80;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 19px/1.5 "Segoe UI", system-ui, sans-serif;
+      height: 100vh; display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; gap: 14px;
+      padding: 14px 22px; border-bottom: 1px solid var(--line); flex: none;
+    }
+    header b { color: var(--accent); letter-spacing: 3px; font-size: 16px; }
+    header .roots { color: var(--muted); font-size: 13px; margin-left: auto; }
+
+    #feed { flex: 1; overflow-y: auto; padding: 18px 22px; }
+    .ev { margin-bottom: 14px; display: flex; gap: 12px; align-items: flex-start; }
+    .ev .tag {
+      flex: none; width: 92px; font-size: 13px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 1px; padding-top: 4px;
+    }
+    .ev .body { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+    .ev.text .body { font-size: 21px; }
+    .ev.tool .body { color: var(--accent); font-family: Consolas, monospace; font-size: 17px; }
+    .ev.result .body { color: var(--muted); font-family: Consolas, monospace; font-size: 15px; }
+    .ev.error .body, .ev.blocked .body { color: var(--bad); }
+    .ev.done .body { color: var(--ok); font-size: 21px; }
+    .ev.start .body { color: var(--warn); }
+
+    #approval {
+      display: none; margin: 0 22px 14px; padding: 16px 18px;
+      border: 2px solid var(--warn); border-radius: 14px; background: rgba(255, 212, 121, .08);
+    }
+    #approval.show { display: block; }
+    #approval h3 { margin: 0 0 8px; font-size: 16px; color: var(--warn); letter-spacing: 1px; }
+    #approval pre {
+      margin: 0 0 12px; white-space: pre-wrap; word-break: break-word;
+      font-family: Consolas, monospace; font-size: 17px; max-height: 30vh; overflow: auto;
+    }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+    footer { flex: none; padding: 14px 22px; border-top: 1px solid var(--line); }
+    textarea {
+      width: 100%; min-height: 64px; resize: vertical; font: inherit; color: var(--text);
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+    }
+    button {
+      font: inherit; font-weight: 600; border: 0; border-radius: 12px;
+      padding: 12px 20px; cursor: pointer;
+    }
+    button.go { background: var(--accent); color: #00333c; }
+    button.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--line); }
+    button.yes { background: var(--ok); color: #05331c; }
+    button.no { background: var(--bad); color: #3d0d0a; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.mic.on { background: var(--bad); color: #fff; }
+    .hint { color: var(--muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <b>AGENT</b>
+    <span id="state" class="hint">gotowy</span>
+    <span class="roots" id="roots"></span>
+  </header>
+
+  <div id="feed"><div class="ev"><div class="tag">start</div><div class="body">Powiedz albo napisz, co mam zrobić. Pracuję w katalogach z białej listy; wszystko, co zmienia pliki albo uruchamia polecenia, najpierw pytam o zgodę.</div></div></div>
+
+  <div id="approval">
+    <h3 id="apTitle">Zgoda na wykonanie</h3>
+    <pre id="apSummary"></pre>
+    <pre id="apDetail" class="hint"></pre>
+    <div class="row">
+      <button class="yes" id="apYes">Wykonaj</button>
+      <button class="no" id="apNo">Odrzuć</button>
+    </div>
+  </div>
+
+  <footer>
+    <textarea id="prompt" placeholder="Np. sprawdź, czy build przechodzi i pokaż ostatnie błędy"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button class="go" id="send">Wyślij</button>
+      <button class="ghost mic" id="mic">🎤 Mów</button>
+      <button class="ghost" id="stopBtn">Nowe zadanie</button>
+      <span class="hint" id="tip">Ctrl+Enter wysyła</span>
+    </div>
+  </footer>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let runId = null;
+    let source = null;
+
+    const TAGS = {
+      start: "zadanie", text: "agent", tool: "robię", result: "wynik",
+      approval: "zgoda?", approval_done: "zgoda", done: "koniec",
+      error: "błąd", blocked: "zablokowane", note: "uwaga",
+    };
+
+    function add(kind, text) {
+      if (!text) return;
+      const row = document.createElement("div");
+      row.className = "ev " + kind;
+      const tag = document.createElement("div");
+      tag.className = "tag";
+      tag.textContent = TAGS[kind] || kind;
+      const body = document.createElement("div");
+      body.className = "body";
+      body.textContent = text;
+      row.appendChild(tag);
+      row.appendChild(body);
+      $("feed").appendChild(row);
+      $("feed").scrollTop = $("feed").scrollHeight;
+    }
+
+    function showApproval(ev) {
+      $("apTitle").textContent = ev.what === "write" ? "Zapisać plik?" : "Wykonać polecenie?";
+      $("apSummary").textContent = ev.summary || "";
+      $("apDetail").textContent = ev.detail || "";
+      $("approval").className = "show";
+    }
+    function hideApproval() { $("approval").className = ""; }
+
+    function handle(ev) {
+      switch (ev.kind) {
+        case "ping": return;
+        case "start": add("start", ev.text); $("state").textContent = "pracuję…"; return;
+        case "text": add("text", ev.text); return;
+        case "tool": add("tool", (ev.cwd ? ev.cwd + "> " : "") + ev.text); return;
+        case "result": add("result", (ev.code !== undefined ? "[" + ev.code + "] " : "") + (ev.text || "")); return;
+        case "approval": showApproval(ev); add("approval", ev.summary); return;
+        case "approval_done":
+          hideApproval();
+          add("approval_done", (ev.approved ? "zgoda: " : "odrzucone: ") + (ev.summary || ""));
+          return;
+        case "blocked": add("blocked", "odrzucone jako niebezpieczne: " + ev.text); return;
+        case "error": add("error", ev.text); $("state").textContent = "błąd"; return;
+        case "done":
+          add("done", ev.text || "gotowe");
+          $("state").textContent = "gotowy";
+          $("send").disabled = false;
+          return;
+        default: add(ev.kind, ev.text || "");
+      }
+    }
+
+    async function send() {
+      const text = $("prompt").value.trim();
+      if (!text) return;
+      $("prompt").value = "";
+      $("send").disabled = true;
+      hideApproval();
+      try {
+        const res = await fetch("/api/agent/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text }),
+        });
+        const data = await res.json();
+        if (!data.id) throw new Error(data.error || "brak id");
+        runId = data.id;
+        listen(runId);
+      } catch (e) {
+        add("error", String(e.message || e));
+        $("send").disabled = false;
+      }
+    }
+
+    function listen(id) {
+      if (source) source.close();
+      source = new EventSource("/api/agent/stream?id=" + encodeURIComponent(id));
+      source.onmessage = (m) => {
+        try { handle(JSON.parse(m.data)); } catch (e) { /* pomijamy śmieci */ }
+      };
+      source.onerror = () => {
+        // Serwer zamyka strumień po "done" — to nie jest błąd.
+        if ($("send").disabled) $("state").textContent = "strumień zerwany";
+        source.close();
+        source = null;
+      };
+    }
+
+    async function decide(ok) {
+      if (!runId) return;
+      hideApproval();
+      await fetch("/api/agent/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: runId, ok: ok }),
+      });
+    }
+
+    $("send").onclick = send;
+    $("apYes").onclick = () => decide(true);
+    $("apNo").onclick = () => decide(false);
+    $("stopBtn").onclick = () => {
+      if (source) { source.close(); source = null; }
+      runId = null;
+      $("feed").innerHTML = "";
+      $("send").disabled = false;
+      $("state").textContent = "gotowy";
+      hideApproval();
+    };
+    $("prompt").onkeydown = (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
+    };
+
+    /* Głos — Web Speech API. Na telefonie i w Chrome na PC działa bez instalacji;
+       gdy przeglądarka go nie ma, przycisk sam się chowa. */
+    (function voice() {
+      const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!Rec) { $("mic").style.display = "none"; return; }
+      const rec = new Rec();
+      rec.lang = "pl-PL";
+      rec.interimResults = true;
+      rec.continuous = false;
+      let on = false;
+      rec.onresult = (e) => {
+        let text = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) text += e.results[i][0].transcript;
+        $("prompt").value = text.trim();
+      };
+      rec.onend = () => {
+        on = false;
+        $("mic").className = "ghost mic";
+        if ($("prompt").value.trim()) send();
+      };
+      rec.onerror = () => { on = false; $("mic").className = "ghost mic"; };
+      $("mic").onclick = () => {
+        if (on) { rec.stop(); return; }
+        on = true;
+        $("mic").className = "ghost mic on";
+        $("prompt").value = "";
+        try { rec.start(); } catch (e) { on = false; $("mic").className = "ghost mic"; }
+      };
+    })();
+
+    fetch("/api/agent/runs").then((r) => r.json()).then((d) => {
+      $("roots").textContent = (d.roots || []).join(" · ");
+      const live = (d.runs || []).filter((r) => !r.done).pop();
+      if (live) { runId = live.id; $("send").disabled = true; listen(live.id); }
+    }).catch(() => { $("roots").textContent = ""; });
+  </script>
+</body>
+</html>

@@ -1,8 +1,8 @@
 {
   "package": "com.uxspace",
-  "versionName": "1.0.8",
-  "versionCode": 9,
+  "versionName": "1.2.0",
+  "versionCode": 16,
   "apk": "/GlassOS.apk",
-  "sha256": "e9493c36dc49d9c1668be9ca3343019ee976be103b85b3edaa046db63be0f3b7",
-  "size": 34043740
+  "sha256": "967c1e0a8c0f2a3b899b16f6e48f6c00101115df506a42dcac77656551daa0ba",
+  "size": 39860976
 }

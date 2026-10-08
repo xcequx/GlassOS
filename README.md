@@ -30,6 +30,7 @@ Telefon (GlassOS)
 | **Workspace** | Focus, 1 ekran, 2 ekrany, 3 ekrany, kino |
 | **Recenter** | Aktualny kierunek głowy = środek pulpitu |
 | **Quick launcher** | Przeglądarka, Gmail, ChatGPT, Slack/Teams, YouTube, terminal/RDP + pełna lista aplikacji |
+| **Zdalne komputery** | RDP / Moonlight / VNC / SSH jako pełne monitory 1080p, prawdziwa mysz, autostart profilu ([docs/REMOTE.md](docs/REMOTE.md)) |
 | **Sterowanie Luma** | Jasność, przyciemnienie soczewek, 2D/3D |
 
 Aplikacje trzecie startują na zaufanych VirtualDisplay przez helper ADB (Wireless Debugging, bez roota i bez osobnego Shizuku).
@@ -56,6 +57,17 @@ python C:\Users\User\Desktop\Glasses\tools\hub\server.py
 
 W przeglądarce `http://IP_PC:30100` przeciągasz aplikacje na ekrany 1/2/3 i klikasz **Włącz na okularach**. Telefon (GlassOS) wdraża layout i odpala apki.
 
+## Zdalne komputery — monitory w okularach
+
+Hub na serwerze w Tailscale, komputery jako pełne monitory 1080p (RDP / Moonlight / VNC / SSH),
+mysz i klawiatura Bluetooth jak przy biurku, profil wchodzi sam po podłączeniu okularów.
+Instalacja huba na serwerze, konfiguracja komputerów i telefonu: **[docs/REMOTE.md](docs/REMOTE.md)**.
+
+```bash
+# serwer Linux w tailnecie
+git clone https://github.com/xcequx/GlassOS.git ~/glassos && sudo bash ~/glassos/tools/hub/deploy/install-linux.sh
+```
+
 ## Uruchomienie i test (telefon + komputer)
 
 Pełna instrukcja kamery/AI: **[docs/START.md](docs/START.md)**.
@@ -71,18 +83,49 @@ Kamera Luma Pro to UVC (`0x0C45:0x636B`). Jeśli telefon nie wystawi jej jako Ca
 
 ## Budowa
 
-Wymagania: JDK 17+, Android Studio (API 36), NDK `30.0.14904198`, CMake `4.1.2`.
+Wymagania: JDK 17+, Android SDK (API 36). Do trackingu dodatkowo NDK `30.0.14904198`
+i CMake `4.1.2`.
 
 ```powershell
 # local.properties — ścieżka do Android SDK
-sdk.dir=C:\\Users\\USER\\AppData\\Local\\Android\\Sdk
+sdk.dir=C:\Users\USER\AppData\Local\Android\Sdk
 
-.\gradlew.bat :app:installDebug
+.\gradlew.bat :app:assembleDebug
 ```
 
-Bez vendored SDK projekt i tak się buduje. Tracking i pokrętła sprzętowe są wtedy nieaktywne, a sam pulpit + touchpad na zewnętrznym ekranie działają.
+Oficjalne SDK VITURE wrzuć do `sdk/VITURE_XR_Glasses_SDK_for_Android/` — build sam je
+skopiuje w odpowiednie miejsca i **sam włączy** natywny mostek, gdy znajdzie SDK i NDK:
 
-SDK: patrz [`glasses/VENDOR_SDK.md`](glasses/VENDOR_SDK.md).
+```
+GlassOS glasses: native bridge ON (SDK=true, NDK=true)
+```
+
+Bez SDK albo bez NDK projekt i tak się buduje (`... OFF`) — pulpit i touchpad działają,
+tracking i pokrętła sprzętowe nie. Szczegóły: [`glasses/VENDOR_SDK.md`](glasses/VENDOR_SDK.md).
+
+Publikacja na hub (telefon aktualizuje się sam z `/api/version`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\hub\publish-apk.ps1
+```
+
+## Agent roboczy
+
+Agent z narzędziami (powłoka, pliki, sterowanie pulpitem) na DeepSeeku, ze strumieniem
+kroków na ekranie w okularach i głosem z przeglądarki: **[docs/AGENT.md](docs/AGENT.md)**.
+Strona `/agent.html` na hubie, gotowy pulpit **Agent** do włączenia na okularach.
+
+Polecenia zmieniające cokolwiek czekają na Twoją zgodę, praca tylko w katalogach z białej
+listy. Inspiracja: [claude-code-g2](https://github.com/sam-siavoshian/claude-code-g2).
+
+## Kiedy coś nie działa
+
+Telefon co 2 sekundy wysyła na hub pełną diagnostykę: listę ekranów, urządzenia USB,
+wersję SDK, stan pulpitu, trackingu i helpera ADB, plus własny log. Hub pokazuje to jako
+checklistę z podpowiedzią przy każdym ✕ — również zdalnie, bez kabla i `adb logcat`.
+
+To samo widać na telefonie w nagłówku (Okulary / Komputer / Pulpit / Głowa), a surowe dane
+są pod `GET /api/diag`.
 
 ## Pierwsze uruchomienie
 

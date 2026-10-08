@@ -114,11 +114,15 @@ class UiScreen(
         }
         val displayId = createTrusted(displayName, width, height, DENSITY_DPI, surface)
         if (displayId == null) {
-            Log.w(
-                TAG,
-                "privileged helper not READY — showing own desktop immediately (no ADB)",
-            )
+            // The helper bootstrap runs in parallel with the first layout, so a null here
+            // usually means "not READY *yet*". Falling straight through to an untrusted
+            // display used to be permanent, and an untrusted screen is exactly the
+            // "screens are empty, apps don't start, icons don't click" state: activities
+            // launch but SurfaceFlinger redacts their frames. Show the desktop now so the
+            // glasses aren't black, then retry for the trusted one.
+            Log.w(TAG, "privileged helper not READY — desktop now, retrying for trusted")
             start(context, presentationFor)
+            retryForTrusted(context, presentationFor, attempt = 1)
             return
         }
         attemptTrustedStart(context, presentationFor, attempt = 1, alreadyCreated = displayId)
@@ -141,6 +145,45 @@ class UiScreen(
         if (released) return
         val createTrusted = WorkspaceController.createVirtualDisplay ?: return
         attemptTrustedBareStart(createTrusted, attempt = 1)
+    }
+
+    /** True once this screen is backed by a helper-created TRUSTED display. */
+    val isTrusted: Boolean get() = trustedDisplayId != null
+
+    /**
+     * Keep asking for a trusted display while the untrusted desktop is already on screen.
+     * The moment the helper answers we swap the backing display underneath, so a session
+     * that started without ADB becomes app-capable the second the helper comes up.
+     */
+    private fun retryForTrusted(
+        context: Context,
+        presentationFor: (Context, Display) -> Presentation,
+        attempt: Int,
+    ) {
+        if (released || trustedDisplayId != null) return
+        if (attempt > MAX_TRUSTED_ATTEMPTS) {
+            Log.w(TAG, "$displayName stays untrusted — helper never came up")
+            return
+        }
+        mainHandler.postDelayed(
+            {
+                if (released || trustedDisplayId != null) return@postDelayed
+                val create = WorkspaceController.createVirtualDisplay
+                val id = create?.invoke(displayName, width, height, DENSITY_DPI, surface)
+                if (id == null) {
+                    retryForTrusted(context, presentationFor, attempt + 1)
+                    return@postDelayed
+                }
+                Log.i(TAG, "$displayName upgraded to a trusted display (attempt $attempt)")
+                // Drop the untrusted presentation + display, then rebuild on the trusted one.
+                runCatching { presentation?.dismiss() }
+                presentation = null
+                runCatching { virtualDisplay?.release() }
+                virtualDisplay = null
+                attemptTrustedStart(context, presentationFor, attempt = 1, alreadyCreated = id)
+            },
+            TRUSTED_RETRY_MS,
+        )
     }
 
     private fun attemptTrustedBareStart(

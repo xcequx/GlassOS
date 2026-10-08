@@ -8,6 +8,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.FileObserver
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
@@ -47,6 +48,20 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
     /** Trusted virtual displays created for the workspace, keyed by display id. */
     private val virtualDisplays = HashMap<Int, VirtualDisplay>()
+
+    /**
+     * When the app last talked to us. The binder handoff is a single shot through a
+     * ContentProvider, so any race — helper started before the app, app restarted,
+     * app frozen by Android while we pushed — left the two sides permanently unpaired
+     * and the user staring at "helper ADB: nieaktywny". We re-push until the app answers.
+     */
+    @Volatile
+    var lastAppCallMs: Long = 0L
+        private set
+
+    private fun appIsTalking() {
+        lastAppCallMs = System.currentTimeMillis()
+    }
 
     /** Shizuku instantiates the user service with this constructor when a Context is available. */
     @Suppress("unused")
@@ -104,6 +119,13 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             runCatching { display.release() }
             Log.i(TAG, "trusted virtual display released id=$displayId")
         }
+    }
+
+    override fun releaseAllVirtualDisplays() {
+        appIsTalking()
+        val n = synchronized(virtualDisplays) { virtualDisplays.size }
+        if (n > 0) Log.i(TAG, "releasing $n stale trusted display(s) at the app's request")
+        releaseAllDisplays()
     }
 
     private fun releaseAllDisplays() {
@@ -177,6 +199,52 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         // see whether the activity actually landed where we asked it to. The dumpsys
         // call is cheap; this only fires once per launch.
         scheduleDisplayDump(displayId, packageName)
+        return ok
+    }
+
+    /**
+     * Remote-desktop launch: an arbitrary intent onto a trusted display. Lets the
+     * workspace open Windows App with an `rdp://` URI, Moonlight with its shortcut
+     * extras, a VNC viewer with `vnc://`, or the default browser with an `https://`
+     * page — one `am start` shape for all of them. Package / activity are optional:
+     * when empty the system resolves the action + data pair the way a tapped link
+     * would. Extras are "key=value" strings handed to `--es`.
+     */
+    override fun launchIntentOnDisplay(
+        displayId: Int,
+        packageName: String?,
+        activityName: String?,
+        action: String?,
+        dataUri: String?,
+        extras: List<String>?,
+    ): Boolean {
+        val cmd = mutableListOf(
+            "am", "start",
+            "--display", displayId.toString(),
+            "--windowingMode", "1",
+            "-f", FLAG_NEW_TASK_MULTIPLE,
+            "--activity-exclude-from-recents",
+            "-a", action?.takeIf { it.isNotBlank() } ?: "android.intent.action.VIEW",
+        )
+        val pkg = packageName.orEmpty()
+        val act = activityName.orEmpty()
+        when {
+            pkg.isNotBlank() && act.isNotBlank() -> cmd += listOf("-n", "$pkg/$act")
+            pkg.isNotBlank() -> cmd += listOf("-p", pkg)
+        }
+        if (!dataUri.isNullOrBlank()) cmd += listOf("-d", dataUri)
+        extras.orEmpty().forEach { kv ->
+            val eq = kv.indexOf('=')
+            if (eq > 0) cmd += listOf("--es", kv.substring(0, eq), kv.substring(eq + 1))
+        }
+        Log.i(
+            "UxSpace/Launch",
+            "11r) helper.launchIntentOnDisplay display=$displayId pkg=$pkg act=$act " +
+                "action=$action data=${dataUri?.take(120)} extras=${extras?.size ?: 0}",
+        )
+        val ok = runVerbose(*cmd.toTypedArray())
+        Log.i("UxSpace/Launch", "12r) am-start returned ok=$ok display=$displayId")
+        scheduleDisplayDump(displayId, pkg.ifBlank { dataUri.orEmpty().take(40) })
         return ok
     }
 
@@ -466,6 +534,135 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
     /** Per-display down timestamp for a streamed touch sequence. */
     private val touchDownAt = mutableMapOf<Int, Long>()
 
+    /** Per-display mouse state for [injectMouse]: down timestamp + held button mask. */
+    private val mouseDownAt = mutableMapOf<Int, Long>()
+    private val mouseButtons = mutableMapOf<Int, Int>()
+
+    /**
+     * Real pointer injection (SOURCE_MOUSE, TOOL_TYPE_MOUSE). A remote-desktop
+     * client reads the button mask off these events, so the remote machine gets a
+     * genuine left / right / middle click and a proper drag — not a finger tap.
+     * Sequence mirrors what InputReader emits for a USB mouse:
+     *  - HOVER_MOVE while no button is held (the app tracks the pointer);
+     *  - DOWN + BUTTON_PRESS on the first button, BUTTON_PRESS alone for extra ones;
+     *  - MOVE with buttonState while held;
+     *  - BUTTON_RELEASE, then UP once the last button goes up.
+     * `setActionButton` is @hide; where reflection cannot reach it the BUTTON_PRESS /
+     * BUTTON_RELEASE frames are skipped — DOWN / UP still carry the button mask.
+     */
+    override fun injectMouse(displayId: Int, x: Int, y: Int, action: Int, buttons: Int) {
+        try {
+            val injector = obtainInjector() ?: run {
+                Log.e(TAG, "mouse: InputManager unavailable")
+                return
+            }
+            val now = SystemClock.uptimeMillis()
+            val held = mouseButtons[displayId] ?: 0
+            when (action) {
+                MOUSE_HOVER -> {
+                    if (held != 0) {
+                        emitMouse(injector, displayId, mouseDownAt[displayId] ?: now, now,
+                            MotionEvent.ACTION_MOVE, x, y, held, 0)
+                    } else {
+                        emitMouse(injector, displayId, now, now,
+                            MotionEvent.ACTION_HOVER_MOVE, x, y, 0, 0)
+                    }
+                }
+                MOUSE_PRESS -> {
+                    val next = held or buttons
+                    if (held == 0) {
+                        mouseDownAt[displayId] = now
+                        emitMouse(injector, displayId, now, now, MotionEvent.ACTION_DOWN, x, y, next, 0)
+                    }
+                    val downAt = mouseDownAt[displayId] ?: now
+                    emitMouse(injector, displayId, downAt, now,
+                        MotionEvent.ACTION_BUTTON_PRESS, x, y, next, buttons)
+                    mouseButtons[displayId] = next
+                }
+                MOUSE_RELEASE -> {
+                    val next = held and buttons.inv()
+                    val downAt = mouseDownAt[displayId] ?: now
+                    emitMouse(injector, displayId, downAt, now,
+                        MotionEvent.ACTION_BUTTON_RELEASE, x, y, next, buttons)
+                    if (next == 0) {
+                        emitMouse(injector, displayId, downAt, now, MotionEvent.ACTION_UP, x, y, 0, 0)
+                        mouseDownAt.remove(displayId)
+                        mouseButtons.remove(displayId)
+                        // Leave the pointer hovering where it was released so the app's
+                        // hover state matches the visible cursor.
+                        emitMouse(injector, displayId, now, now,
+                            MotionEvent.ACTION_HOVER_MOVE, x, y, 0, 0)
+                    } else {
+                        mouseButtons[displayId] = next
+                    }
+                }
+                MOUSE_MOVE -> {
+                    val downAt = mouseDownAt[displayId] ?: now
+                    emitMouse(injector, displayId, downAt, now,
+                        MotionEvent.ACTION_MOVE, x, y, if (held != 0) held else buttons, 0)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "mouse injection failed", t)
+        }
+    }
+
+    private fun emitMouse(
+        injector: Any,
+        displayId: Int,
+        downAt: Long,
+        eventAt: Long,
+        action: Int,
+        x: Int,
+        y: Int,
+        buttonState: Int,
+        actionButton: Int,
+    ) {
+        val props = arrayOf(
+            MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_MOUSE
+            },
+        )
+        val coords = arrayOf(
+            MotionEvent.PointerCoords().apply {
+                this.x = x.toFloat()
+                this.y = y.toFloat()
+                pressure = if (buttonState != 0) 1f else 0f
+                size = 1f
+            },
+        )
+        val event = MotionEvent.obtain(
+            downAt, eventAt, action, 1, props, coords,
+            0, buttonState, 1f, 1f, 0, 0,
+            InputDevice.SOURCE_MOUSE, 0,
+        )
+        event.source = InputDevice.SOURCE_MOUSE
+        if (actionButton != 0) {
+            val set = runCatching {
+                event.javaClass.getMethod("setActionButton", Int::class.javaPrimitiveType)
+                    .invoke(event, actionButton)
+            }.isSuccess
+            if (!set) {
+                // No way to tag the button on this OS build — the DOWN / UP frames
+                // already carry the mask, so skipping the press frame is safe.
+                event.recycle()
+                return
+            }
+        }
+        runCatching {
+            event.javaClass.getMethod("setDisplayId", Int::class.javaPrimitiveType)
+                .invoke(event, displayId)
+        }
+        val injectMethod = injector.javaClass.getMethod(
+            "injectInputEvent",
+            android.view.InputEvent::class.java,
+            Int::class.javaPrimitiveType,
+        )
+        injectMethod.invoke(injector, event, 0)
+        event.recycle()
+    }
+
     /**
      * Inject a one-shot ACTION_SCROLL motion event on the target display — mouse-wheel
      * equivalent, fast, no synthesized touch swipe. Same shape as `UiScreen.dispatchScroll`,
@@ -635,7 +832,24 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
     @Volatile private var hotkeyMonitor: HotkeyMonitor? = null
 
+    /** Death watch on the app, so its displays don't outlive it. */
+    private var appDeath: IBinder.DeathRecipient? = null
+
+    private fun watchApp(listener: IPrivilegedHotkeyListener) {
+        val binder = runCatching { listener.asBinder() }.getOrNull() ?: return
+        appDeath?.let { runCatching { binder.unlinkToDeath(it, 0) } }
+        val recipient = IBinder.DeathRecipient {
+            Log.w(TAG, "GlassOS died — releasing its trusted displays")
+            releaseAllDisplays()
+        }
+        runCatching { binder.linkToDeath(recipient, 0) }
+            .onSuccess { appDeath = recipient }
+            .onFailure { Log.w(TAG, "linkToDeath failed: ${it.message}") }
+    }
+
     override fun setHotkeyListener(listener: IPrivilegedHotkeyListener?) {
+        appIsTalking()
+        if (listener != null) watchApp(listener)
         synchronized(this) {
             hotkeyMonitor?.stop()
             hotkeyMonitor = null
@@ -1413,6 +1627,12 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         // doesn't ride in the same raw -f blob. See launchOnDisplay() for the reason.
         private const val FLAG_NEW_TASK_MULTIPLE = "0x18000000"
 
+        /** [injectMouse] action codes — mirrored in PrivilegedService. */
+        private const val MOUSE_HOVER = 0
+        private const val MOUSE_PRESS = 1
+        private const val MOUSE_RELEASE = 2
+        private const val MOUSE_MOVE = 3
+
         /** Frame spacing for the pinch interpolation in [pinchOnDisplay]. */
         private const val PINCH_STEP_MS = 16
 
@@ -1459,6 +1679,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                     ?: throw IllegalStateException("could not obtain a system context")
                 val server = PrivilegedServer().also { it.setContext(systemContext) }
                 sendBinderToApp(server)
+                startHandoffRetries(server)
                 Log.i(TAG, "PrivilegedServer ready; entering main loop")
                 Looper.loop()
             } catch (t: Throwable) {
@@ -1466,6 +1687,34 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                 exitProcess(1)
             }
         }
+
+        /**
+         * Keep offering our Binder until GlassOS takes it.
+         *
+         * One handoff at start-up is not enough: the app may not be running yet, may be
+         * restarted later, or may be frozen exactly while we push. Until the app makes a
+         * call of its own we re-send every [HANDOFF_RETRY_MS]; the retries cost one
+         * provider call and stop the moment the two sides are talking.
+         */
+        private fun startHandoffRetries(server: PrivilegedServer) {
+            val handler = Handler(Looper.myLooper() ?: Looper.getMainLooper())
+            handler.postDelayed(
+                object : Runnable {
+                    override fun run() {
+                        val quiet = System.currentTimeMillis() - server.lastAppCallMs
+                        if (server.lastAppCallMs == 0L || quiet > HANDOFF_QUIET_MS) {
+                            runCatching { sendBinderToApp(server) }
+                                .onFailure { Log.w(TAG, "re-handoff failed: ${it.message}") }
+                        }
+                        handler.postDelayed(this, HANDOFF_RETRY_MS)
+                    }
+                },
+                HANDOFF_RETRY_MS,
+            )
+        }
+
+        private const val HANDOFF_RETRY_MS = 5_000L
+        private const val HANDOFF_QUIET_MS = 15_000L
 
         /**
          * Kill any other `uxspace_privileged` processes left over from previous app

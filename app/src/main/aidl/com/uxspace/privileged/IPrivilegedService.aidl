@@ -89,4 +89,33 @@ interface IPrivilegedService {
      * Idempotent — silent no-op when no VITURE device is present.
      */
     void rescanGlassesUsb() = 15;
+
+    /**
+     * Drop every trusted virtual display this helper owns.
+     *
+     * The helper outlives the app (it is a shell-uid process), so a crashed or restarted
+     * GlassOS used to leave its desktop and per-app displays behind forever. The app calls
+     * this the moment it binds, and the helper also does it by itself when the app dies.
+     */
+    void releaseAllVirtualDisplays() = 17;
+
+    /**
+     * Launch an arbitrary intent onto the given display — the remote-desktop path.
+     * packageName/activityName may be empty (the system resolves the action + data
+     * URI, e.g. `rdp://…` or `https://…`); action defaults to VIEW when empty;
+     * extras are "key=value" string pairs passed as `--es`. Returns true on success.
+     */
+    boolean launchIntentOnDisplay(int displayId, String packageName, String activityName,
+        String action, String dataUri, in List<String> extras) = 18;
+
+    /**
+     * Inject one frame of a *mouse* pointer stream on the given display, so an app
+     * sees a real pointer (hover, buttons, drag) instead of a finger. action:
+     * 0 = HOVER_MOVE (no button held), 1 = button press, 2 = button release,
+     * 3 = MOVE with a button held. buttons: bit mask of MotionEvent.BUTTON_*
+     * (1 primary, 2 secondary, 4 tertiary). The helper keeps the per-display
+     * button state so a press/release pair produces DOWN/BUTTON_PRESS and
+     * BUTTON_RELEASE/UP the way the kernel driver would.
+     */
+    void injectMouse(int displayId, int x, int y, int action, int buttons) = 19;
 }

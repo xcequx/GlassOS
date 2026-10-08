@@ -465,12 +465,19 @@ class TrackpadView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawText(
-            "Touchpad — drag to move · tap to click · hold to grab a window · two fingers scroll",
-            width / 2f,
-            height / 2f,
-            labelPaint,
+        // Short lines, not one long sentence: on a phone the single line ran off both
+        // edges and read as a rendering glitch.
+        val lines = listOf(
+            "1 palec — kursor, tap — klik",
+            "przytrzymaj — chwyt okna",
+            "2 palce — scroll, szczypta — zoom",
         )
+        val step = labelPaint.textSize * 1.6f
+        var y = height / 2f - step
+        lines.forEach { line ->
+            canvas.drawText(line, width / 2f, y, labelPaint)
+            y += step
+        }
     }
 
     private companion object {

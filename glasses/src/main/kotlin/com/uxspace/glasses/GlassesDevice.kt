@@ -92,6 +92,9 @@ object GlassesDevice {
         )
     }
 
+    /** Live brightness from the SDK's device-state cache, or -1 without the SDK. */
+    fun brightness(): Int = runCatching { NativeGlasses.getBrightness() }.getOrDefault(-1)
+
     fun setBrightness(level: Int): Int =
         runCatching { NativeGlasses.setBrightness(level.coerceIn(0, 8)) }.getOrDefault(-1)
 
@@ -101,8 +104,34 @@ object GlassesDevice {
     fun setFilmLevel(percent: Float): Int =
         runCatching { NativeGlasses.setFilm((percent / 100f).coerceIn(0f, 1f)) }.getOrDefault(-1)
 
-    fun switchDimension(stereo3d: Boolean): Int =
-        runCatching { NativeGlasses.switchDimension(stereo3d) }.getOrDefault(-1)
+    /**
+     * Switch 2D / 3D by naming the exact video mode instead of asking the glasses to
+     * toggle.
+     *
+     * `xr_device_provider_switch_dimension` renegotiates the DisplayPort link and on Luma
+     * Pro it can drop the link entirely — the glasses go black and no SDK call brings them
+     * back. Setting a known mode (1080p60 or SBS 3D 60) is deterministic, and the caller
+     * watches the display afterwards so a failed switch can be walked back.
+     */
+    fun setStereo(stereo3d: Boolean): Int = runCatching {
+        NativeGlasses.setDisplayMode(
+            if (stereo3d) NativeGlasses.DISPLAY_MODE_SBS_60 else NativeGlasses.DISPLAY_MODE_1080P_60,
+        )
+    }.getOrDefault(-1)
+
+    fun switchDimension(stereo3d: Boolean): Int = setStereo(stereo3d)
+
+    /**
+     * Put the video link back on 1080p60.
+     *
+     * The DisplayPort link sometimes renegotiates down to 640×480 (classic VGA fallback)
+     * after a USB re-enumeration — the workspace then renders 1920×1080 into a postage
+     * stamp. With the SDK vendored we can just ask for a sane mode instead of telling the
+     * user to replug the cable.
+     */
+    fun setMode1080p60(): Int =
+        runCatching { NativeGlasses.setDisplayMode(NativeGlasses.DISPLAY_MODE_1080P_60) }
+            .getOrDefault(-1)
 
     fun setRefresh120(): Int =
         runCatching { NativeGlasses.setDisplayMode(NativeGlasses.DISPLAY_MODE_1080P_120) }

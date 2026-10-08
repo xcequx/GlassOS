@@ -27,6 +27,7 @@ object WorkspaceSettings {
     private const val KEY_AUTO_RECENTER_ON_UNLOCK = "auto_recenter_on_unlock"
     private const val KEY_CARINA_6DOF = "carina_6dof"
     private const val KEY_SCREEN_FILL = "screen_fill"
+    private const val KEY_LAST_LAYOUT = "last_layout"
 
     /** Default screen fill — 100%, i.e. the workspace fills the full glasses display. */
     const val DEFAULT_SCREEN_FILL = 1.0f
@@ -45,6 +46,7 @@ object WorkspaceSettings {
     private const val KEY_MAX_WINDOWS_PER_SLOT = "max_windows_per_slot"
     private const val KEY_SNAP_ZONES_ENABLED = "snap_zones_enabled"
     private const val KEY_RESIZE_HANDLES_ENABLED = "resize_handles_enabled"
+    private const val KEY_POINTER_TO_APPS = "pointer_to_apps"
     private const val KEY_RECORDING_FRAME_INTERVAL = "recording_frame_interval"
     private const val KEY_CAPTURE_DEBUG_OVERLAY = "capture_debug_overlay"
     private const val KEY_SHOW_TASKBAR = "show_taskbar"
@@ -59,7 +61,13 @@ object WorkspaceSettings {
     const val DEFAULT_RECORDING_FRAME_INTERVAL = 12
 
     private const val KEY_APP_DISPLAY_DPI = "app_display_dpi"
-    const val DEFAULT_APP_DISPLAY_DPI = 200
+    /**
+     * 140 dpi, not 200: at 200 an app window reports roughly a phone's worth of dp and
+     * Android hands you the phone layout. Lower dpi means more dp across the same window,
+     * which is what flips Gmail, Chrome and the rest into their tablet / desktop layouts —
+     * the "like on a computer" look.
+     */
+    const val DEFAULT_APP_DISPLAY_DPI = 140
 
     /**
      * Density-DPI range the Windows tab's slider offers. Lower numbers mean less
@@ -201,6 +209,16 @@ object WorkspaceSettings {
 
     fun setScreenFill(value: Float) = putFloat(KEY_SCREEN_FILL, value.coerceIn(0.5f, 1.0f))
 
+    // Last workspace layout — restored on the next glasses session, so a 2- or 3-screen
+    // setup does not silently collapse back to a single screen after every app restart.
+    fun lastLayout(): Layout {
+        if (!::prefs.isInitialized) return Layout.SINGLE
+        val name = prefs.getString(KEY_LAST_LAYOUT, null) ?: return Layout.SINGLE
+        return runCatching { Layout.valueOf(name) }.getOrDefault(Layout.SINGLE)
+    }
+
+    fun setLastLayout(layout: Layout) = putString(KEY_LAST_LAYOUT, layout.name)
+
     // Windows
     fun maxWindowsPerSlot(): Int =
         if (::prefs.isInitialized) prefs.getInt(KEY_MAX_WINDOWS_PER_SLOT, DEFAULT_MAX_WINDOWS_PER_SLOT)
@@ -214,6 +232,11 @@ object WorkspaceSettings {
     fun resizeHandlesEnabled(): Boolean =
         if (::prefs.isInitialized) prefs.getBoolean(KEY_RESIZE_HANDLES_ENABLED, true) else true
     fun setResizeHandlesEnabled(v: Boolean) = putBoolean(KEY_RESIZE_HANDLES_ENABLED, v)
+
+    /** Physical mouse over an app window = real pointer events (hover, right-click, drag). */
+    fun pointerToAppsEnabled(): Boolean =
+        if (::prefs.isInitialized) prefs.getBoolean(KEY_POINTER_TO_APPS, true) else true
+    fun setPointerToAppsEnabled(v: Boolean) = putBoolean(KEY_POINTER_TO_APPS, v)
 
     // Capture
     fun recordingFrameInterval(): Int =
@@ -273,6 +296,12 @@ object WorkspaceSettings {
     fun resetAll() {
         if (!::prefs.isInitialized) return
         prefs.edit().clear().apply()
+        listeners.forEach { runCatching { it() } }
+    }
+
+    private fun putString(key: String, v: String) {
+        if (!::prefs.isInitialized) return
+        prefs.edit().putString(key, v).apply()
         listeners.forEach { runCatching { it() } }
     }
 

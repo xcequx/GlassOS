@@ -4,129 +4,89 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GlassOS Hub</title>
-  <style>
-    :root {
-      --bg: #0b0e14; --panel: #161b24; --panel2: #1e2533; --line: #2a3344;
-      --text: #e8eef6; --muted: #93a0b4; --accent: #5ee0f7; --ok: #7cffb2; --danger: #ff8a80;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", system-ui, sans-serif;
-      background: radial-gradient(1200px 600px at 20% -10%, #163044 0%, var(--bg) 55%);
-      color: var(--text);
-      min-height: 100vh;
-    }
-    header {
-      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-      padding: 16px 24px; border-bottom: 1px solid var(--line);
-    }
-    header strong { letter-spacing: 3px; color: var(--accent); }
-    .status { margin-left: auto; font-size: 13px; color: var(--muted); }
-    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--danger); }
-    .dot.on { background: var(--ok); }
-    .url { font-size: 13px; color: var(--accent); }
-    main { display: grid; grid-template-columns: 260px 1fr 340px; gap: 16px; padding: 16px 24px 32px; }
-    @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
-    h2 { font-size: 12px; letter-spacing: 1px; color: var(--muted); font-weight: 600; margin: 0 0 10px; }
-    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
-    .desk, .host {
-      display: flex; align-items: center; gap: 10px;
-      padding: 10px 12px; border-radius: 12px; cursor: pointer; margin-bottom: 8px;
-      border: 1px solid transparent;
-    }
-    .desk:hover, .host:hover { background: var(--panel2); }
-    .desk.active, .host.active { border-color: var(--accent); background: rgba(94,224,247,.12); }
-    .apps { max-height: 280px; overflow: auto; }
-    .app { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 10px; cursor: grab; font-size: 13px; }
-    .app:hover { background: var(--panel2); }
-    .glyph {
-      width: 28px; height: 28px; border-radius: 8px; background: #2a3b4e;
-      display: grid; place-items: center; font-weight: 700; color: var(--accent); font-size: 12px;
-    }
-    .screens { display: grid; gap: 12px; }
-    .screen {
-      min-height: 140px; background: #0f141c; border: 1px dashed var(--line);
-      border-radius: 16px; padding: 12px;
-    }
-    .screen h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent); }
-    .chip {
-      display: inline-flex; align-items: center; gap: 8px;
-      background: var(--panel2); border-radius: 999px; padding: 6px 10px;
-      margin: 0 8px 8px 0; font-size: 13px;
-    }
-    .chip button, .tiny { background: none; border: 0; color: var(--muted); cursor: pointer; }
-    button.primary, button.ghost, select, input, textarea {
-      font: inherit; color: var(--text);
-    }
-    button.primary {
-      background: var(--accent); color: #00333c; border: 0; border-radius: 10px;
-      padding: 10px 14px; font-weight: 700; cursor: pointer;
-    }
-    button.ghost {
-      background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
-      padding: 10px 14px; cursor: pointer;
-    }
-    select, input[type=text], textarea {
-      background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
-      padding: 8px 10px; width: 100%;
-    }
-    textarea { min-height: 72px; resize: vertical; }
-    .row { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
-    .hint { font-size: 12px; color: var(--muted); line-height: 1.45; }
-    .empty { color: var(--muted); font-size: 13px; padding: 16px 8px; }
-    .log { max-height: 280px; overflow: auto; font-size: 13px; }
-    .msg { padding: 8px 0; border-bottom: 1px solid var(--line); }
-    .msg.user { color: var(--accent); }
-    .stack { display: grid; gap: 12px; }
-  </style>
+  <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
   <header>
     <strong>GLASSOS HUB</strong>
     <span class="url" id="hubUrl"></span>
-    <a href="/GlassOS.apk" style="color:var(--accent);font-size:13px">pobierz APK</a>
-    <div class="status"><span id="dot" class="dot"></span><span id="phoneStatus">czekam na telefon…</span></div>
+    <div class="pills" id="pills"></div>
+    <div class="spacer"></div>
+    <a href="/agent.html" id="agentLink" title="Agent roboczy — wykonuje polecenia i edytuje pliki">AGENT</a>
+    <a href="/GlassOS.apk" id="apkLink">APK</a>
   </header>
+  <p id="banner"></p>
+
   <main>
+    <!-- lewa kolumna -->
     <div class="stack">
       <section class="card">
-        <h2>PULPITY</h2>
+        <h2>STAN POŁĄCZENIA</h2>
+        <div id="checks"><div class="empty">…</div></div>
+      </section>
+
+      <section class="card">
+        <h2>PULPITY <span class="count" id="deskCount"></span></h2>
         <div id="desktops"></div>
         <div class="row"><input id="newName" type="text" placeholder="Nazwa, np. Praca" /></div>
-        <div class="row"><button class="ghost" id="addDesk">Nowy pulpit</button></div>
-      </section>
-      <section class="card">
-        <h2>KOMPUTERY SSH</h2>
-        <div id="hosts"></div>
-        <input id="cName" type="text" placeholder="Nazwa" style="margin-bottom:8px" />
-        <input id="cHost" type="text" placeholder="host, np. 192.168.1.20" style="margin-bottom:8px" />
         <div class="row">
-          <input id="cUser" type="text" placeholder="user" />
-          <input id="cPort" type="text" placeholder="22" style="width:70px" />
+          <button class="ghost" id="addDesk">Nowy pulpit</button>
+          <button class="mini" id="delDesk">Usuń</button>
         </div>
-        <div class="row"><button class="ghost" id="addHost">Dodaj komputer</button></div>
+      </section>
+
+      <section class="card">
+        <h2>KOMPUTERY <span class="count" id="hostCount"></span></h2>
+        <div id="hosts"></div>
         <select id="cKind" style="margin-bottom:8px">
-          <option value="ssh">SSH</option>
-          <option value="rdp">RDP (pulpit zdalny na tym PC)</option>
+          <option value="rdp">RDP — Windows Pro / serwer (Windows App)</option>
+          <option value="moonlight">Moonlight — Sunshine na PC (też Windows Home)</option>
+          <option value="vnc">VNC — Linux / Mac / inne</option>
+          <option value="ssh">SSH — terminal przez hub</option>
         </select>
-        <p class="hint">SSH = polecenia z huba. RDP = otwiera Pulpit zdalny Windowsa na komputerze huba. Najprostszy multi-PC: jeden hub, okulary jako ekran, telefon jako pad+głos.</p>
+        <input id="cName" type="text" placeholder="Nazwa, np. Praca" style="margin-bottom:8px" />
+        <input id="cHost" type="text" placeholder="host w Tailscale, np. pc-praca" style="margin-bottom:8px" />
+        <div class="row">
+          <input id="cUser" type="text" placeholder="użytkownik" />
+          <input id="cPort" type="text" placeholder="port" style="width:80px" />
+        </div>
+        <input id="cMac" type="text" placeholder="MAC do Wake-on-LAN (opcjonalnie)" style="margin-bottom:8px" />
+        <div id="moonFields" style="display:none">
+          <input id="cUuid" type="text" placeholder="UUID komputera z Moonlight (opcjonalnie)" style="margin-bottom:8px" />
+          <input id="cApp" type="text" placeholder="Aplikacja w Sunshine, domyślnie Desktop" style="margin-bottom:8px" />
+        </div>
+        <div class="row">
+          <button class="ghost" id="addHost">Dodaj komputer</button>
+          <button class="mini" id="cancelEdit" style="display:none">Anuluj</button>
+        </div>
+        <p class="hint" id="hostHint">Telefon łączy się z komputerem bezpośrednio przez Tailscale; hub tylko
+          mówi mu, co otworzyć. Zielona kropka = port odpowiada z huba.</p>
       </section>
     </div>
-    <section>
-      <div class="card" style="margin-bottom:12px">
-        <h2>PODGLĄD OKULARÓW NA ŻYWO</h2>
-        <img id="live" alt="brak obrazu — podłącz okulary i otwórz GlassOS"
-             style="width:100%;background:#0f141c;border-radius:12px;min-height:180px;object-fit:contain" />
+
+    <!-- środek -->
+    <section class="stack">
+      <div class="card">
+        <h2>PODGLĄD OKULARÓW <span class="count" id="previewAge"></span></h2>
+        <div class="preview-wrap">
+          <img id="live" alt="" />
+          <span class="badge" id="liveBadge">brak obrazu</span>
+        </div>
         <div class="row">
           <button class="ghost" id="zoomOut">− Zoom</button>
           <button class="ghost" id="zoomIn">+ Zoom</button>
           <button class="ghost" id="resetLook">Na wprost</button>
           <button class="ghost" id="nextScreen">Następny ekran</button>
+          <button class="ghost" data-cmd="fit_screens">Pokaż wszystkie ekrany</button>
+          <button class="ghost" data-cmd="unpin">Odepnij od głowy</button>
+          <button class="ghost" data-cmd="pin">Przypnij do głowy</button>
+          <button class="ghost" id="recenter">Recenter</button>
         </div>
-        <p class="hint">To jest to, co widać w okularach. Układaj pulpity poniżej i tu sprawdzaj.</p>
+        <p class="hint" id="liveNote">Podgląd leci z telefonu, kiedy pulpit działa w okularach.
+          <b>Przeciągnij po obrazie</b> = kursor, klik = klik, prawy przycisk = menu, kółko = zoom.</p>
       </div>
-      <div class="card" style="margin-bottom:12px">
+
+      <div class="card">
         <h2>UKŁAD I EKRANY</h2>
         <div class="row">
           <select id="layout">
@@ -138,231 +98,66 @@
           </select>
           <button class="primary" id="apply">Włącz na okularach</button>
           <button class="ghost" id="save">Zapisz</button>
-          <button class="ghost" id="recenter">Recenter</button>
         </div>
-        <p class="hint">Poczta / przeglądarka / SSH działają bez parowania ADB. Aplikacje z telefonu — tylko jeśli helper ADB kiedyś wstanie.</p>
+        <label class="hint" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="autostart" />
+          Włączaj ten pulpit sam, gdy podłączę okulary do telefonu
+        </label>
+        <p class="hint" id="applyHint">Komputery, strony i aplikacje otwierają się przez helper ADB na telefonie
+          (jednorazowe parowanie). Komputer na ekranie = pełny monitor 1080p.</p>
       </div>
+
       <div class="screens" id="screens"></div>
+
+      <div class="card">
+        <h2>OKULARY — STEROWANIE</h2>
+        <div class="row">
+          <button class="ghost" data-cmd="brightness_down">Jaśniej −</button>
+          <button class="ghost" data-cmd="brightness_up">Jaśniej +</button>
+          <button class="ghost" data-cmd="stereo_toggle">2D / 3D</button>
+          <button class="ghost" data-cmd="taskbar_toggle">Pasek zadań</button>
+          <button class="ghost" data-cmd="film_toggle">Przyciemnienie</button>
+          <button class="ghost" data-cmd="display_1080p">Wymuś 1080p</button>
+          <button class="ghost" data-cmd="retry_tracking">Napraw tracking</button>
+          <button class="ghost" data-cmd="restart_workspace">Restart pulpitu</button>
+        </div>
+        <p class="hint">Komendy idą do telefonu przy następnym pulsie (≤2 s).</p>
+      </div>
     </section>
+
+    <!-- prawa kolumna -->
     <div class="stack">
       <section class="card">
-        <h2>AI — NA BIEŻĄCO</h2>
-        <div class="log" id="chat"></div>
+        <h2>ASYSTENT</h2>
+        <div class="chatlog" id="chat"></div>
         <textarea id="prompt" placeholder="Np. daj 2 ekrany: poczta i przeglądarka Google"></textarea>
-        <div class="row"><button class="primary" id="ask">Wyślij</button></div>
-        <p class="hint" id="aiHint">DeepSeek V4.1 Flash — historia + pamięć + sterowanie pulpitami z okularów/głosu.</p>
+        <div class="row">
+          <button class="primary" id="ask">Wyślij</button>
+          <button class="mini" id="clearChat">Wyczyść</button>
+        </div>
+        <p class="hint" id="aiHint">—</p>
       </section>
+
       <section class="card">
-        <h2>PLIKI NA PC</h2>
-        <div id="files" class="hint">—</div>
-      </section>
-      <section class="card">
-        <h2>APLIKACJE Z TELEFONU</h2>
+        <h2>APLIKACJE Z TELEFONU <span class="count" id="appCount"></span></h2>
         <input id="filter" type="text" placeholder="Szukaj…" style="margin-bottom:10px" />
         <div class="apps" id="apps"><div class="empty">Telefon jeszcze nie zgłosił listy.</div></div>
+        <p class="hint">Przeciągnij apkę na Ekran 1/2/3.</p>
+      </section>
+
+      <section class="card">
+        <div class="tabs">
+          <button class="tab active" data-pane="logs">LOG TELEFONU</button>
+          <button class="tab" data-pane="diag">SUROWA DIAGNOSTYKA</button>
+          <button class="tab" data-pane="files">PLIKI PC</button>
+        </div>
+        <div class="log" id="logs"><div class="empty">—</div></div>
+        <div class="log" id="diag" style="display:none"><div class="empty">—</div></div>
+        <div class="log" id="files" style="display:none"><div class="empty">—</div></div>
       </section>
     </div>
   </main>
-  <script>
-    const state = { desktops: [], computers: [], phone: { apps: [], glasses: {} }, chat: [], current: null, host: null };
 
-    const $ = (id) => document.getElementById(id);
-    $("hubUrl").textContent = location.origin;
-
-    async function api(path, opts) {
-      const res = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
-      if (!res.ok) throw new Error(await res.text());
-      return res.json();
-    }
-
-    function screenCount(layout) {
-      if (layout === "THREE_SBS") return 3;
-      if (layout === "TWO_SBS") return 2;
-      return 1;
-    }
-    function currentDesk() { return state.desktops.find((d) => d.id === state.current); }
-
-    function renderDesktops() {
-      $("desktops").innerHTML = state.desktops.map((d) =>
-        `<div class="desk ${d.id === state.current ? "active" : ""}" data-id="${d.id}">
-          <div><div>${d.name}</div><div class="hint">${d.layout}</div></div>
-        </div>`
-      ).join("");
-      $("desktops").querySelectorAll(".desk").forEach((el) => {
-        el.onclick = () => { state.current = el.dataset.id; render(); };
-      });
-    }
-
-    function renderHosts() {
-      $("hosts").innerHTML = (state.computers || []).map((c) =>
-        `<div class="host ${c.id === state.host ? "active" : ""}" data-id="${c.id}">
-          <div><div>${c.name}</div><div class="hint">${c.kind || "ssh"} · ${c.user ? c.user+"@" : ""}${c.host}:${c.port || 22}</div></div>
-        </div>`
-      ).join("") || `<div class="empty">Brak hostów.</div>`;
-      $("hosts").querySelectorAll(".host").forEach((el) => {
-        el.onclick = () => { state.host = el.dataset.id; renderHosts(); };
-        el.ondblclick = () => api("/api/remote/open", { method: "POST", body: JSON.stringify({ id: el.dataset.id }) });
-      });
-    }
-
-    function itemChip(a, slot, ai) {
-      const kind = a.type && a.type !== "app" ? a.type : "app";
-      return `<span class="chip">${a.label || kind}<button data-slot="${slot}" data-i="${ai}">✕</button></span>`;
-    }
-
-    function renderScreens() {
-      const d = currentDesk();
-      if (!d) { $("screens").innerHTML = ""; return; }
-      $("layout").value = d.layout;
-      const n = screenCount(d.layout);
-      while (d.screens.length < n) d.screens.push([]);
-      d.screens = d.screens.slice(0, n);
-      $("screens").innerHTML = d.screens.map((apps, i) => `
-        <div class="screen" data-slot="${i}">
-          <h3>Ekran ${i + 1}</h3>
-          <div class="row">
-            <button class="ghost" data-add="mail" data-slot="${i}">Poczta</button>
-            <button class="ghost" data-add="browser" data-slot="${i}">Przeglądarka</button>
-            <button class="ghost" data-add="ssh" data-slot="${i}">SSH</button>
-          </div>
-          <div>${apps.map((a, ai) => itemChip(a, i, ai)).join("") || `<div class="empty">Poczta / web / SSH albo przeciągnij apkę</div>`}</div>
-        </div>`).join("");
-      $("screens").querySelectorAll(".screen").forEach((el) => {
-        el.ondragover = (e) => { e.preventDefault(); el.style.borderColor = "#5ee0f7"; };
-        el.ondragleave = () => { el.style.borderColor = ""; };
-        el.ondrop = (e) => {
-          e.preventDefault(); el.style.borderColor = "";
-          const app = JSON.parse(e.dataTransfer.getData("application/json"));
-          const slot = Number(el.dataset.slot);
-          const list = d.screens[slot];
-          if (!list.some((x) => x.packageName && x.packageName === app.packageName)) list.push({ ...app, type: "app" });
-          renderScreens();
-        };
-      });
-      $("screens").querySelectorAll(".chip button").forEach((b) => {
-        b.onclick = () => { d.screens[Number(b.dataset.slot)].splice(Number(b.dataset.i), 1); renderScreens(); };
-      });
-      $("screens").querySelectorAll("[data-add]").forEach((b) => {
-        b.onclick = () => {
-          const slot = Number(b.dataset.slot);
-          const kind = b.dataset.add;
-          if (kind === "mail") d.screens[slot].push({ type: "mail", label: "Poczta", packageName: "", activityName: "", url: "" });
-          if (kind === "browser") {
-            const url = prompt("Adres strony", "https://www.google.com") || "https://www.google.com";
-            d.screens[slot].push({ type: "browser", label: "Web", packageName: "", activityName: "", url });
-          }
-          if (kind === "ssh") {
-            const id = state.host || (state.computers[0] && state.computers[0].id);
-            if (!id) { alert("Najpierw dodaj komputer SSH z lewej."); return; }
-            const c = state.computers.find((x) => x.id === id);
-            d.screens[slot].push({ type: "ssh", label: c ? c.name : "SSH", packageName: "", activityName: "", hostId: id });
-          }
-          renderScreens();
-        };
-      });
-    }
-
-    function renderApps() {
-      const q = $("filter").value.toLowerCase();
-      const apps = (state.phone.apps || []).filter((a) => (a.label || "").toLowerCase().includes(q));
-      const shown = apps.slice(0, 250);
-      $("apps").innerHTML = shown.length ? shown.map((a, i) =>
-        `<div class="app" draggable="true" data-i="${i}">
-          <div class="glyph">${(a.label || "?").slice(0, 1).toUpperCase()}</div>
-          <div>${a.label}<div class="hint">${a.packageName}</div></div>
-        </div>`
-      ).join("") : `<div class="empty">Brak listy — otwórz GlassOS na telefonie.</div>`;
-      $("apps").querySelectorAll(".app").forEach((el) => {
-        const app = shown[Number(el.dataset.i)];
-        el.ondragstart = (e) => e.dataTransfer.setData("application/json", JSON.stringify(app));
-      });
-    }
-
-    function renderPhone() {
-      const g = state.phone.glasses || {};
-      const seen = state.phone.seen || 0;
-      const on = (Date.now() / 1000 - seen) < 10;
-      $("dot").className = "dot" + (on ? " on" : "");
-      $("phoneStatus").textContent = on
-        ? `telefon online · ${g.model || "okulary"} · ${g.layout || ""}`
-        : "telefon offline — Tailscale + GlassOS";
-    }
-
-    function renderChat() {
-      $("chat").innerHTML = (state.chat || []).slice(-12).map((m) =>
-        `<div class="msg ${m.role}">${m.role === "user" ? "Ty" : "AI"}: ${escapeHtml(m.text || "").slice(0, 800)}</div>`
-      ).join("") || `<div class="empty">Napisz, co ma być na ekranach.</div>`;
-      $("chat").scrollTop = $("chat").scrollHeight;
-    }
-
-    function escapeHtml(s) {
-      return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-    }
-
-    function render() { renderDesktops(); renderHosts(); renderScreens(); renderApps(); renderPhone(); renderChat(); }
-
-    $("layout").onchange = () => { const d = currentDesk(); if (!d) return; d.layout = $("layout").value; renderScreens(); };
-    $("filter").oninput = renderApps;
-    $("addDesk").onclick = async () => {
-      const name = $("newName").value.trim() || "Nowy pulpit";
-      const created = await api("/api/desktops", { method: "POST", body: JSON.stringify({ name, layout: "TWO_SBS", screens: [[], []] }) });
-      state.current = created.id; $("newName").value = ""; await load();
-    };
-    $("addHost").onclick = async () => {
-      const created = await api("/api/computers", { method: "POST", body: JSON.stringify({
-        name: $("cName").value, host: $("cHost").value, user: $("cUser").value,
-        port: Number($("cPort").value || ($("cKind").value === "rdp" ? 3389 : 22)),
-        kind: $("cKind").value,
-      })});
-      state.host = created.id;
-      $("cName").value = $("cHost").value = $("cUser").value = $("cPort").value = "";
-      await load();
-    };
-    $("save").onclick = async () => {
-      const d = currentDesk(); if (!d) return;
-      await api("/api/desktops/" + d.id, { method: "PUT", body: JSON.stringify(d) });
-      await load();
-    };
-    $("apply").onclick = async () => {
-      const d = currentDesk(); if (!d) return;
-      await api("/api/desktops/" + d.id, { method: "PUT", body: JSON.stringify(d) });
-      await api("/api/apply", { method: "POST", body: JSON.stringify({ id: d.id }) });
-    };
-    $("recenter").onclick = () => api("/api/command", { method: "POST", body: JSON.stringify({ type: "recenter" }) });
-    $("nextScreen").onclick = () => api("/api/command", { method: "POST", body: JSON.stringify({ type: "next_screen" }) });
-    $("zoomIn").onclick = () => api("/api/command", { method: "POST", body: JSON.stringify({ type: "zoom_in" }) });
-    $("zoomOut").onclick = () => api("/api/command", { method: "POST", body: JSON.stringify({ type: "zoom_out" }) });
-    $("resetLook").onclick = () => api("/api/command", { method: "POST", body: JSON.stringify({ type: "reset_look" }) });
-    setInterval(() => { $("live").src = "/preview.jpg?t=" + Date.now(); }, 800);
-    $("ask").onclick = async () => {
-      const text = $("prompt").value.trim(); if (!text) return;
-      $("prompt").value = "";
-      $("aiHint").textContent = "myślę…";
-      try {
-        const r = await api("/api/ai/chat", { method: "POST", body: JSON.stringify({ text }) });
-        $("aiHint").textContent = r.applied ? "AI zmieniło pulpit — włączone na okularach." : "odpowiedź gotowa";
-        await load();
-      } catch (e) {
-        $("aiHint").textContent = "AI: " + String(e.message || e).slice(0, 120);
-      }
-    };
-
-    async function load() {
-      const s = await api("/api/state");
-      state.desktops = s.desktops || [];
-      state.computers = s.computers || [];
-      state.phone = s.phone || { apps: [], glasses: {} };
-      state.chat = s.chat || [];
-      const files = s.files || [];
-      $("files").innerHTML = files.length
-        ? files.map((f) => `${f.folder}/${f.name}`).join("<br>")
-        : "Brak plików na pulpicie/Dokumentach.";
-      if (s.ai && s.ai.deepseek) $("aiHint").textContent = "DeepSeek " + (s.ai.model || "deepseek-flash") + " — historia i narzędzia włączone.";
-      if (!state.current && state.desktops[0]) state.current = state.desktops[0].id;
-      render();
-    }
-    load();
-    setInterval(load, 2000);
-  </script>
+  <script src="/app.js"></script>
 </body>
 </html>

@@ -13,6 +13,8 @@ import argparse
 import base64
 import json
 import os
+import re
+import socket
 import subprocess
 import threading
 import time
@@ -25,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from agent import Agent
 from assistant import Assistant, recent_files
 
 ROOT = Path(__file__).resolve().parent
@@ -73,19 +76,27 @@ DEFAULT_STATE = {
         "voice": True,
         "tts": True,
         "default_layout": "TWO_SBS",
+        # Desktop the phone applies by itself when the glasses connect ("" = off).
+        "autostart_desktop": "",
     },
 }
+
+# Default port per computer kind — what the phone's client connects to, and what
+# the hub probes to show the green dot.
+KIND_PORTS = {"rdp": 3389, "moonlight": 47989, "vnc": 5900, "ssh": 22}
+KIND_LABELS = {"rdp": "RDP", "moonlight": "Moonlight", "vnc": "VNC", "ssh": "SSH"}
 
 SYSTEM_PROMPT = (
     "Jesteś asystentem GlassOS — pulpit w okularach VITURE, sterowany z komputera. "
     "Odpowiadaj po polsku, krótko i konkretnie. "
-    "Możesz układać ekrany, pocztę, przeglądarkę i SSH. "
+    "Możesz układać ekrany, pocztę, przeglądarkę, SSH i zdalne komputery (RDP / Moonlight / VNC). "
     "Gdy użytkownik chce zmianę pulpitu, na końcu odpowiedzi dodaj blok:\n"
     "```glassos\n"
-    '{"layout":"TWO_SBS","screens":[[{"type":"mail","label":"Poczta"}],'
+    '{"layout":"TWO_SBS","screens":[[{"type":"remote","label":"Praca","hostId":"ID_KOMPUTERA"}],'
     '[{"type":"browser","label":"Web","url":"https://www.google.com"}]]}\n'
     "```\n"
-    "Dozwolone type: mail, browser, ssh, app. layout: FOCUS, SINGLE, TWO_SBS, THREE_SBS, SINGLE_WIDE."
+    "Dozwolone type: mail, browser, ssh, remote (z hostId z listy komputerów), app. "
+    "layout: FOCUS, SINGLE, TWO_SBS, THREE_SBS, SINGLE_WIDE."
 )
 
 
@@ -98,6 +109,20 @@ def find_apk() -> Path | None:
         if p.exists():
             return p
     return None
+
+
+APK_CACHE: dict = {"mtime": 0.0, "data": {}}
+
+
+def apk_manifest_cached() -> dict:
+    try:
+        mtime = VERSION_FILE.stat().st_mtime if VERSION_FILE.exists() else 0.0
+    except OSError:
+        mtime = 0.0
+    if mtime != APK_CACHE["mtime"] or not APK_CACHE["data"]:
+        APK_CACHE["mtime"] = mtime
+        APK_CACHE["data"] = apk_manifest()
+    return APK_CACHE["data"]
 
 
 def apk_manifest() -> dict:
@@ -153,7 +178,26 @@ def load_state() -> dict:
     return merged
 
 
-def save_state(state: dict) -> None:
+REV = {"n": 1}
+
+
+def bump_rev() -> int:
+    """Every mutation bumps a counter so the browser can poll cheaply."""
+    REV["n"] += 1
+    return REV["n"]
+
+
+def save_state(state: dict, persist: bool = True) -> None:
+    """Bump the revision the web UI polls on and write to disk.
+
+    The phone heartbeats every 2 s. Writing 35 kB of state.json — and bumping the
+    revision, which makes every open browser re-download the full state — on each
+    of those beats was pure churn. Heartbeats that carry nothing new pass
+    ``persist=False`` and change neither the file nor the revision.
+    """
+    if not persist:
+        return
+    bump_rev()
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -163,8 +207,168 @@ FRAMES: dict[str, deque[bytes]] = defaultdict(lambda: deque(maxlen=MAX_FRAMES))
 PREVIEW_JPEG = bytearray()
 PREVIEW_AT = 0.0
 
+# Phone-side log lines (the app posts its own ring buffer) — this is how you see
+# what GlassOS is doing without a USB cable and adb logcat.
+LOGS: deque[dict] = deque(maxlen=400)
+FILES_CACHE: dict = {"at": 0.0, "items": []}
+PHONE_ONLINE_S = 8
+
+
+def cached_files() -> list[dict]:
+    """recent_files() touches the disk; the UI polls often, so cache it."""
+    now = time.time()
+    if now - FILES_CACHE["at"] > 20:
+        try:
+            FILES_CACHE["items"] = recent_files()
+        except Exception:
+            FILES_CACHE["items"] = []
+        FILES_CACHE["at"] = now
+    return FILES_CACHE["items"]
+
+
+def phone_ago() -> float:
+    return time.time() - float(STATE.get("phone", {}).get("seen", 0) or 0)
+
+
+def phone_online() -> bool:
+    return phone_ago() < PHONE_ONLINE_S
+
+
+def usb_pid_suffix(diag: dict) -> str:
+    try:
+        pid = int(diag.get("usbPid") or 0)
+    except (TypeError, ValueError):
+        return ""
+    return f" · pid 0x{pid:04x}" if pid else ""
+
+
+def checks() -> list[dict]:
+    """Every link in the chain, with the one action that fixes a broken one.
+
+    This is the answer to "it connects but nothing works": each item says what
+    is true right now, and what to do about it.
+    """
+    phone = STATE.get("phone", {}) or {}
+    glasses = phone.get("glasses", {}) or {}
+    diag = phone.get("diag", {}) or {}
+    out: list[dict] = []
+
+    def add(key, label, ok, detail="", hint=""):
+        out.append({"key": key, "label": label, "ok": bool(ok), "detail": detail, "hint": hint})
+
+    online = phone_online()
+    ago = phone_ago()
+    add(
+        "phone",
+        "Telefon",
+        online,
+        (f"{diag.get('device') or 'telefon'} · GlassOS {diag.get('appVersion') or '?'}"
+         if online else (f"cisza od {int(ago)} s" if ago < 10**6 else "nigdy się nie zgłosił")),
+        "Otwórz GlassOS na telefonie i sprawdź, czy ma zasięg do tego huba (Tailscale / to samo Wi-Fi).",
+    )
+    usb = bool(glasses.get("usb", glasses.get("connected")))
+    add(
+        "usb",
+        "Okulary na USB",
+        usb,
+        (glasses.get("model") or "—") + usb_pid_suffix(diag),
+        "Wepnij VITURE w USB-C telefonu i zezwól na dostęp do urządzenia USB.",
+    )
+    disp = bool(glasses.get("display", diag.get("glassesDisplay")))
+    add(
+        "display",
+        "Ekran okularów",
+        disp,
+        diag.get("displayLabel") or (glasses.get("mode") or "—"),
+        "Telefon musi wystawiać obraz przez DisplayPort. Na Samsungu wyłącz DeX / dublowanie ekranu "
+        "— GlassOS potrzebuje okularów jako osobnego ekranu.",
+    )
+    ws = bool(glasses.get("workspace"))
+    add(
+        "workspace",
+        "Pulpit w okularach",
+        ws,
+        diag.get("workspaceError") or ("działa" if ws else "nie wystartował"),
+        "Otwórz GlassOS na pierwszym planie przy podłączonych okularach.",
+    )
+    dof = bool(glasses.get("dof"))
+    add(
+        "tracking",
+        "Śledzenie głowy",
+        dof,
+        diag.get("trackingDetail") or (glasses.get("tracking") or ("3DoF" if dof else "brak")),
+        "Zezwól GlassOS na dostęp do urządzenia USB VITURE (okno systemowe przy podłączeniu).",
+    )
+    sdk = bool(diag.get("sdkPresent"))
+    add(
+        "sdk",
+        "SDK VITURE",
+        sdk,
+        diag.get("sdkVersion") or ("wkompilowane" if sdk else "brak natywnego mostka"),
+        "Zbuduj APK z wgranym SDK (sdk/VITURE_XR_Glasses_SDK_for_Android) i zainstaluj nową wersję.",
+    )
+    adb = bool(diag.get("privileged"))
+    add(
+        "adb",
+        "Helper ADB (apki z telefonu)",
+        adb,
+        diag.get("privilegedState") or ("gotowy" if adb else "nieaktywny"),
+        "Opcjonalne. Potrzebne tylko po to, by odpalać apki telefonu na ekranach okularów: "
+        "sparuj debugowanie bezprzewodowe albo uruchom tools/adb-helper.ps1 z PC.",
+    )
+    ai_ok = bool(deepseek_key() or xai_key())
+    add(
+        "ai",
+        "Asystent AI",
+        ai_ok,
+        (os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash") if deepseek_key() else
+        (xai_model() if xai_key() else "brak klucza"),
+        "Wstaw DEEPSEEK_API_KEY do tools/hub/.env i zrestartuj hub.",
+    )
+    return out
+
+
+def status_payload() -> dict:
+    phone = STATE.get("phone", {}) or {}
+    diag = phone.get("diag", {}) or {}
+    items = checks()
+    return {
+        "ok": True,
+        "rev": REV["n"],
+        "uptime": int(time.time() - STARTED),
+        "phone": {
+            "online": phone_online(),
+            "ago": int(phone_ago()) if phone.get("seen") else None,
+            "apps": len(phone.get("apps") or []),
+            "version": diag.get("appVersion") or phone.get("version") or "",
+            "device": diag.get("device") or "",
+        },
+        "glasses": phone.get("glasses", {}) or {},
+        "checks": items,
+        "problems": [c for c in items if not c["ok"]],
+        "preview": {
+            "present": bool(PREVIEW_JPEG),
+            "age": round(time.time() - PREVIEW_AT, 1) if PREVIEW_AT else None,
+        },
+        "pending": len(STATE.get("pending") or []),
+        "logs": len(LOGS),
+        "computers": [
+            {"id": c["id"], "online": c["online"], "ms": c["ms"]} for c in computers_with_status()
+        ],
+        "settings": STATE.get("settings") or {},
+        "ai": {
+            "deepseek": bool(deepseek_key()),
+            "xai": bool(xai_key()),
+            "model": (os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash")
+            if deepseek_key()
+            else (xai_model() if xai_key() else ""),
+        },
+        "apk": apk_manifest_cached(),
+    }
+
 
 ASSISTANT: Assistant | None = None
+AGENT: Agent | None = None
 
 
 def xai_key() -> str:
@@ -240,6 +444,120 @@ def computer_by_id(cid: str) -> dict | None:
         if c.get("id") == cid:
             return c
     return None
+
+
+def norm_computer(body: dict, existing: dict | None = None) -> dict:
+    """One shape for a computer record, whatever the browser sent.
+
+    `host` is what the *phone* connects to — a Tailscale MagicDNS name is the
+    stable choice. `mac` enables Wake-on-LAN from the hub (same LAN only).
+    """
+    base = dict(existing or {})
+    kind = str(body.get("kind") or base.get("kind") or "ssh").lower()
+    if kind not in KIND_PORTS:
+        kind = "ssh"
+    try:
+        port = int(body.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port <= 0:
+        port = int(base.get("port") or 0) if kind == base.get("kind") else 0
+    if port <= 0:
+        port = KIND_PORTS[kind]
+
+    def num(key: str) -> int:
+        try:
+            return int(body.get(key) or base.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    host = str(body.get("host") or base.get("host") or "").strip()
+    return {
+        "id": base.get("id") or uuid.uuid4().hex[:8],
+        "name": str(body.get("name") or base.get("name") or host or "Komputer").strip(),
+        "host": host,
+        "user": str(body.get("user") if body.get("user") is not None else base.get("user") or "").strip(),
+        "port": port,
+        "kind": kind,
+        "mac": str(body.get("mac") if body.get("mac") is not None else base.get("mac") or "").strip(),
+        "uuid": str(body.get("uuid") if body.get("uuid") is not None else base.get("uuid") or "").strip(),
+        "app": str(body.get("app") if body.get("app") is not None else base.get("app") or "").strip(),
+        "appId": str(body.get("appId") if body.get("appId") is not None else base.get("appId") or "").strip(),
+        "width": num("width"),
+        "height": num("height"),
+    }
+
+
+# ---- reachability: a green dot per computer, probed from the hub every few seconds ----
+
+PROBE: dict[str, dict] = {}
+PROBE_INTERVAL_S = 8.0
+
+
+def probe_port(host: str, port: int, timeout: float = 1.5) -> float | None:
+    """Round-trip ms of a TCP connect to host:port, or None when unreachable."""
+    if not host:
+        return None
+    started = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return round((time.time() - started) * 1000)
+    except OSError:
+        return None
+
+
+def probe_loop() -> None:
+    while True:
+        with LOCK:
+            comps = [dict(c) for c in (STATE.get("computers") or [])]
+        for c in comps:
+            ms = probe_port(c.get("host") or "", int(c.get("port") or KIND_PORTS.get(c.get("kind"), 22)))
+            entry = PROBE.setdefault(c["id"], {"online": False, "ms": None, "seen": 0.0})
+            entry["online"] = ms is not None
+            entry["ms"] = ms
+            if ms is not None:
+                entry["seen"] = time.time()
+        time.sleep(PROBE_INTERVAL_S)
+
+
+def computers_with_status() -> list[dict]:
+    out = []
+    for c in STATE.get("computers") or []:
+        pr = PROBE.get(c.get("id") or "", {})
+        d = dict(c)
+        d["online"] = bool(pr.get("online"))
+        d["ms"] = pr.get("ms")
+        d["kindLabel"] = KIND_LABELS.get(c.get("kind") or "", c.get("kind") or "")
+        out.append(d)
+    return out
+
+
+def send_wol(mac: str, host: str = "") -> dict:
+    """Wake-on-LAN magic packet: LAN broadcast plus, if it resolves, the host itself.
+
+    Only works when the hub sits in the same LAN as the machine (or the router
+    forwards directed broadcasts) — Tailscale does not carry broadcast frames.
+    """
+    clean = re.sub(r"[^0-9a-fA-F]", "", mac or "")
+    if len(clean) != 12:
+        return {"ok": False, "error": "MAC musi mieć 12 znaków hex, np. AA:BB:CC:DD:EE:FF"}
+    payload = b"\xff" * 6 + bytes.fromhex(clean) * 16
+    sent = []
+    targets = [("255.255.255.255", 9), ("255.255.255.255", 7)]
+    if host:
+        try:
+            targets.append((socket.gethostbyname(host), 9))
+        except OSError:
+            pass
+    for addr, port in targets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.sendto(payload, (addr, port))
+                sent.append(f"{addr}:{port}")
+        except OSError as exc:
+            sent.append(f"{addr}:{port} ✕ {exc}")
+    return {"ok": True, "sent": sent}
 
 
 def run_ssh(comp: dict, command: str) -> dict:
@@ -415,15 +733,69 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/api/computers":
+            with LOCK:
+                self._json(200, {"computers": computers_with_status()})
+            return
         if path == "/api/state":
             with LOCK:
                 payload = dict(STATE)
-                payload["files"] = recent_files()
+                payload["computers"] = computers_with_status()
+                payload["rev"] = REV["n"]
+                payload["files"] = cached_files()
                 payload["ai"] = {
                     "deepseek": bool(deepseek_key()),
                     "model": os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash",
                 }
                 self._json(200, payload)
+            return
+        if path == "/api/status":
+            # Small and cheap: this is what the browser polls every second.
+            with LOCK:
+                self._json(200, status_payload())
+            return
+        if path == "/api/checks":
+            with LOCK:
+                self._json(200, {"checks": checks()})
+            return
+        if path == "/api/diag":
+            with LOCK:
+                self._json(
+                    200,
+                    {
+                        "diag": (STATE.get("phone", {}) or {}).get("diag", {}),
+                        "glasses": (STATE.get("phone", {}) or {}).get("glasses", {}),
+                        "checks": checks(),
+                        "logs": list(LOGS)[-120:],
+                    },
+                )
+            return
+        if path == "/api/agent/stream":
+            self._agent_stream(urlparse(self.path).query)
+            return
+        if path == "/api/agent/runs":
+            runs = []
+            if AGENT is not None:
+                for run in list(AGENT.runs.values())[-6:]:
+                    runs.append(
+                        {
+                            "id": run.id,
+                            "prompt": run.prompt,
+                            "done": run.done,
+                            "pending": run.pending,
+                            "started": run.started,
+                            "events": len(run.history),
+                        }
+                    )
+            self._json(200, {"runs": runs, "roots": [str(r) for r in __import__("agent").roots()]})
+            return
+        if path == "/api/logs":
+            with LOCK:
+                self._json(200, {"logs": list(LOGS)})
+            return
+        if path == "/api/apps":
+            with LOCK:
+                self._json(200, {"apps": (STATE.get("phone", {}) or {}).get("apps") or []})
             return
         if path == "/v1/live/status":
             self._json(200, {"ok": True, "glasses_http_enabled": True, "xai_enabled": bool(xai_key())})
@@ -443,7 +815,12 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 data = bytes(PREVIEW_JPEG)
             if not data:
-                self._json(404, {"error": "brak podglądu — otwórz GlassOS i podłącz okulary"})
+                # 204, not 404: the <img> in the UI polls this and a 404 storm in
+                # the console is noise, not information.
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
@@ -452,6 +829,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(data)
+            return
+        asset = self._static_asset(path)
+        if asset is not None:
+            body, ctype = asset
+            self._bytes(200, body, ctype)
             return
         if path == "/view/ssh":
             self._bytes(200, SSH_PAGE.encode("utf-8"), "text/html; charset=utf-8")
@@ -463,6 +845,85 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         self._json(404, {"error": "not found"})
+
+    def _agent_stream(self, query: str) -> None:
+        """Server-sent events for one agent run — the glasses page listens on this."""
+        params = urllib.parse.parse_qs(query or "")
+        run_id = (params.get("id") or [""])[0]
+        run = AGENT.get(run_id) if AGENT else None
+        if run is None:
+            self._json(404, {"error": "nieznany przebieg"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.close_connection = True
+
+        def write(event: dict) -> bool:
+            try:
+                self.wfile.write(
+                    ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8")
+                )
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return False
+
+        # Odtwarzamy historię i dalej idziemy po indeksie, a nie po kolejce:
+        # kolejkę dzieliłoby między sobą kilka otwartych kart i każda widziałaby
+        # połowę zdarzeń.
+        idx = 0
+        quiet = 0.0
+        while True:
+            if idx < len(run.history):
+                event = run.history[idx]
+                idx += 1
+                quiet = 0.0
+                if not write(event):
+                    return
+                if event.get("kind") == "done":
+                    return
+                continue
+            if run.done:
+                return
+            time.sleep(0.15)
+            quiet += 0.15
+            if quiet >= 15:
+                quiet = 0.0
+                if not write({"kind": "ping", "ts": time.time()}):
+                    return
+
+    STATIC_TYPES = {
+        ".js": "application/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".ico": "image/x-icon",
+        ".webmanifest": "application/manifest+json",
+    }
+
+    def _static_asset(self, path: str) -> tuple[bytes, str] | None:
+        """Serve tools/hub/static/* so the UI can live in real .js / .css files."""
+        name = path.lstrip("/")
+        if not name or ".." in name:
+            return None
+        target = (STATIC / name).resolve()
+        try:
+            target.relative_to(STATIC.resolve())
+        except ValueError:
+            return None
+        if not target.is_file():
+            return None
+        ctype = self.STATIC_TYPES.get(target.suffix.lower())
+        if ctype is None:
+            return None
+        return target.read_bytes(), ctype
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -482,13 +943,62 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/v1/phone/hello":
             with LOCK:
+                prev = STATE.get("phone", {}) or {}
+                apps = body.get("apps")
+                # A heartbeat without an app list must not wipe the list we have.
+                if not apps:
+                    apps = prev.get("apps") or []
+                glasses = body.get("glasses") or {}
+                diag = body.get("diag") or prev.get("diag") or {}
+                changed = (
+                    len(apps) != len(prev.get("apps") or [])
+                    or glasses != (prev.get("glasses") or {})
+                    or diag != (prev.get("diag") or {})
+                )
                 STATE["phone"] = {
-                    "apps": body.get("apps") or [],
-                    "glasses": body.get("glasses") or {},
+                    "apps": apps,
+                    "glasses": glasses,
+                    "diag": diag,
+                    "version": body.get("version") or prev.get("version") or "",
                     "seen": time.time(),
                 }
-                save_state(STATE)
-            self._json(200, {"ok": True, "pending": len(STATE.get("pending") or [])})
+                for line in (body.get("logs") or [])[-60:]:
+                    LOGS.append(
+                        {
+                            "ts": time.time(),
+                            "level": str(line.get("level") or "I")[:1],
+                            "tag": str(line.get("tag") or "")[:40],
+                            "text": str(line.get("text") or "")[:400],
+                        }
+                        if isinstance(line, dict)
+                        else {"ts": time.time(), "level": "I", "tag": "", "text": str(line)[:400]}
+                    )
+                # Persist only when something real moved — see save_state().
+                save_state(STATE, persist=changed)
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "pending": len(STATE.get("pending") or []),
+                    "wantApps": not (STATE.get("phone", {}) or {}).get("apps"),
+                },
+            )
+            return
+        if path == "/v1/phone/log":
+            with LOCK:
+                for line in (body.get("logs") or [])[-200:]:
+                    if isinstance(line, dict):
+                        LOGS.append(
+                            {
+                                "ts": float(line.get("ts") or time.time()),
+                                "level": str(line.get("level") or "I")[:1],
+                                "tag": str(line.get("tag") or "")[:40],
+                                "text": str(line.get("text") or "")[:400],
+                            }
+                        )
+                    else:
+                        LOGS.append({"ts": time.time(), "level": "I", "tag": "", "text": str(line)[:400]})
+            self._json(200, {"ok": True, "stored": len(LOGS)})
             return
         if path == "/api/desktops":
             desk = {
@@ -501,6 +1011,39 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.setdefault("desktops", []).append(desk)
                 save_state(STATE)
             self._json(200, desk)
+            return
+        if path.startswith("/api/desktops/") and path.endswith("/delete"):
+            desk_id = path.split("/")[3]
+            with LOCK:
+                desks = STATE.setdefault("desktops", [])
+                before = len(desks)
+                STATE["desktops"] = [d for d in desks if d.get("id") != desk_id]
+                save_state(STATE)
+            self._json(200, {"ok": True, "removed": before - len(STATE["desktops"])})
+            return
+        if path == "/api/agent/ask":
+            text = str(body.get("text") or "").strip()
+            if not text:
+                self._json(400, {"error": "puste zadanie"})
+                return
+            if AGENT is None:
+                self._json(503, {"error": "agent nie wystartował"})
+                return
+            run = AGENT.start(text)
+            self._json(200, {"ok": True, "id": run.id})
+            return
+        if path == "/api/agent/approve":
+            if AGENT is None:
+                self._json(503, {"error": "agent nie wystartował"})
+                return
+            ok = AGENT.approve(str(body.get("id") or ""), bool(body.get("ok")))
+            self._json(200, {"ok": ok})
+            return
+        if path == "/api/chat/clear":
+            with LOCK:
+                STATE["chat"] = []
+                save_state(STATE)
+            self._json(200, {"ok": True})
             return
         if path == "/api/apply":
             cmd = enqueue({"type": "apply_desktop", "desktopId": body.get("id")})
@@ -539,18 +1082,52 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "text": reply, "reply": reply})
             return
         if path == "/api/computers":
-            comp = {
-                "id": uuid.uuid4().hex[:8],
-                "name": body.get("name") or body.get("host") or "Komputer",
-                "host": body.get("host") or "",
-                "user": body.get("user") or "",
-                "port": int(body.get("port") or (3389 if body.get("kind") == "rdp" else 22)),
-                "kind": body.get("kind") or "ssh",
-            }
+            comp = norm_computer(body)
+            if not comp["host"]:
+                self._json(400, {"error": "podaj host (nazwa w Tailscale albo IP)"})
+                return
             with LOCK:
                 STATE.setdefault("computers", []).append(comp)
                 save_state(STATE)
             self._json(200, comp)
+            return
+        if path.startswith("/api/computers/") and path.endswith("/delete"):
+            cid = path.split("/")[3]
+            with LOCK:
+                comps = STATE.setdefault("computers", [])
+                before = len(comps)
+                STATE["computers"] = [c for c in comps if c.get("id") != cid]
+                # Tiles pointing at the removed machine would launch nothing — drop them.
+                for desk in STATE.get("desktops") or []:
+                    desk["screens"] = [
+                        [a for a in screen if not (a.get("type") == "remote" and a.get("hostId") == cid)]
+                        for screen in (desk.get("screens") or [])
+                    ]
+                PROBE.pop(cid, None)
+                save_state(STATE)
+            self._json(200, {"ok": True, "removed": before - len(STATE["computers"])})
+            return
+        if path.startswith("/api/computers/") and path.endswith("/wake"):
+            cid = path.split("/")[3]
+            comp = computer_by_id(cid)
+            if not comp:
+                self._json(404, {"error": "brak komputera"})
+                return
+            self._json(200, send_wol(comp.get("mac") or "", comp.get("host") or ""))
+            return
+        if path.startswith("/api/computers/") and path.endswith("/open"):
+            # One computer onto one glasses screen, without touching the saved desktop.
+            cid = path.split("/")[3]
+            comp = computer_by_id(cid)
+            if not comp:
+                self._json(404, {"error": "brak komputera"})
+                return
+            try:
+                screen = int(body.get("screenIdx") or 0)
+            except (TypeError, ValueError):
+                screen = 0
+            cmd = enqueue({"type": "remote", "hostId": cid, "screenIdx": screen, "label": comp.get("name")})
+            self._json(200, cmd)
             return
         if path == "/api/ssh/run":
             cid = str(body.get("id") or "")
@@ -620,12 +1197,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        if path.startswith("/api/computers/"):
+            cid = path.rsplit("/", 1)[-1]
+            with LOCK:
+                comps = STATE.setdefault("computers", [])
+                for i, c in enumerate(comps):
+                    if c.get("id") == cid:
+                        comps[i] = norm_computer(body, c)
+                        save_state(STATE)
+                        self._json(200, comps[i])
+                        return
+            self._json(404, {"error": "computer not found"})
+            return
         if not path.startswith("/api/desktops/"):
             self._json(404, {"error": "not found"})
             return
         desk_id = path.rsplit("/", 1)[-1]
-        length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
         with LOCK:
             desks = STATE.setdefault("desktops", [])
             for i, d in enumerate(desks):
@@ -646,7 +1235,8 @@ def main() -> None:
     args = parser.parse_args()
     print(f"GlassOS Hub  http://{args.host}:{args.port}")
     print("  Otwórz tę stronę w przeglądarce i układaj pulpit okularów.")
-    global ASSISTANT
+    global ASSISTANT, AGENT
+    AGENT = Agent(enqueue=enqueue, get_state=lambda: STATE)
     ASSISTANT = Assistant(
         get_state=lambda: STATE,
         save_state=save_state,
@@ -660,6 +1250,7 @@ def main() -> None:
         else ("XAI_API_KEY OK" if xai_key() else "bez klucza")
     )
     print(f"  AI: {ai_label}")
+    threading.Thread(target=probe_loop, name="probe", daemon=True).start()
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 
 

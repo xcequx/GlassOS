@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
+import com.uxspace.spatial.WorkspaceController
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
@@ -290,24 +291,66 @@ object PrivilegedService {
             Log.w(TAG, "onPrivilegedBinder: ping failed")
             return
         }
-        // Displace any previously-bound server. Without this, the spawn-race window
+        // The helper re-offers its Binder until we answer (it cannot tell whether an
+        // earlier handoff landed). Recognising our own helper is essential: treating the
+        // repeat as a rival and calling exit() on it killed the live helper every time,
+        // which is what turned the desktop screens untrusted mid-session.
+        val previous = service
+        if (previous != null && previous.asBinder() == binder) {
+            Log.i(TAG, "same privileged helper re-offered its binder — keeping it")
+            if (state != State.READY) setState(State.READY)
+            return
+        }
+        // Displace any genuinely different server. Without this, the spawn-race window
         // can hand us a second (or third) binder for a separate PrivilegedServer
         // process — each one running its own /dev/input/event* HotkeyMonitor and
         // its own native input injector. The orphans never exit on their own.
-        val previous = service
         if (previous != null) {
             Log.w(TAG, "displacing previously-bound privileged service — calling exit()")
             runCatching { previous.setHotkeyListener(null) }
             runCatching { previous.exit() }
         }
         service = IPrivilegedService.Stub.asInterface(binder)
+        watchHelperDeath(binder)
         Log.i(TAG, "privileged binder bound — READY")
+        // A helper that survived our last run still owns that run's virtual displays.
+        // Clear them before we create our own, or they pile up invisibly.
+        runCatching { service?.releaseAllVirtualDisplays() }
+            .onFailure { Log.w(TAG, "releaseAllVirtualDisplays failed: ${it.message}") }
         // Only install the hotkey listener if a keyboard is actually attached. With
         // no keyboard the helper opens no /dev/input/event* nodes at all — minimum
         // footprint, no contention against the glasses' USB IMU endpoint on OEMs
         // (Samsung) where BT input attach disturbs USB hosts.
         if (hotkeyMonitoringRequested) installHotkeyListener()
         setState(State.READY)
+    }
+
+    private var helperDeath: IBinder.DeathRecipient? = null
+
+    /**
+     * Notice when the helper dies instead of reporting READY at a corpse.
+     *
+     * A stale READY is worse than a clean "not ready": every trusted-display request then
+     * fails with DeadObjectException, screens quietly fall back to untrusted ones, and the
+     * checklist keeps claiming the ADB layer is fine while no app can render.
+     */
+    private fun watchHelperDeath(binder: IBinder) {
+        helperDeath?.let { runCatching { binder.unlinkToDeath(it, 0) } }
+        val recipient = IBinder.DeathRecipient {
+            Log.w(TAG, "privileged helper died — leaving READY")
+            service = null
+            helperDeath = null
+            mainHandler.post {
+                WorkspaceController.privilegedReady = false
+                setState(State.NEEDS_PAIRING)
+                // The helper re-offers its binder every few seconds while it lives, so a
+                // restarted helper re-pairs on its own; this just stops us lying about it.
+                ensureRunning()
+            }
+        }
+        runCatching { binder.linkToDeath(recipient, 0) }
+            .onSuccess { helperDeath = recipient }
+            .onFailure { Log.w(TAG, "linkToDeath on helper failed: ${it.message}") }
     }
 
     /**
@@ -497,6 +540,51 @@ object PrivilegedService {
         Log.d(TAG, "injectTouch $name @ ($x,$y) display=$displayId")
         onWorker { service?.injectTouch(displayId, x, y, action) }
     }
+
+    /**
+     * Remote-desktop launch: any intent onto a trusted display (see
+     * `IPrivilegedService.launchIntentOnDisplay`). [extras] are "key=value" pairs.
+     */
+    fun launchIntent(
+        displayId: Int,
+        packageName: String,
+        activityName: String,
+        action: String,
+        dataUri: String,
+        extras: List<String>,
+    ) {
+        val helper = service
+        if (helper == null) {
+            Log.w(TAG, "launchIntent ignored — not READY (state=$state)")
+            return
+        }
+        worker.execute {
+            runCatching {
+                val ok = helper.launchIntentOnDisplay(
+                    displayId, packageName, activityName, action, dataUri, extras,
+                )
+                Log.i(
+                    "UxSpace/Launch",
+                    "9r) helper returned ok=$ok data=${dataUri.take(80)} display=$displayId",
+                )
+            }.onFailure { Log.e(TAG, "launchIntent failed", it) }
+        }
+    }
+
+    /** [injectMouse] action codes — mirror PrivilegedServer. */
+    const val MOUSE_HOVER = 0
+    const val MOUSE_PRESS = 1
+    const val MOUSE_RELEASE = 2
+    const val MOUSE_MOVE = 3
+
+    /**
+     * Real pointer stream into an app's display: hover while no button is held,
+     * press / release with a MotionEvent.BUTTON_* mask, move while held. The app
+     * sees a mouse, so a remote-desktop client forwards left / right / middle and
+     * drags to the far machine.
+     */
+    fun injectMouse(displayId: Int, x: Int, y: Int, action: Int, buttons: Int) =
+        onWorker { service?.injectMouse(displayId, x, y, action, buttons) }
 
     fun key(displayId: Int, keyCode: Int) = onWorker { service?.key(displayId, keyCode) }
 

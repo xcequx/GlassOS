@@ -11,8 +11,8 @@ android {
         applicationId = "com.uxspace"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "1.0.8"
+        versionCode = 16
+        versionName = "1.2.0"
 
         // Cloudflare Access service-token headers for the in-app self-updater to reach the
         // gated dist server (https://dist.darkclad.org/uxspace/). Injected at build time by
@@ -23,6 +23,22 @@ android {
         val cfClientSecret = (project.findProperty("CF_ACCESS_CLIENT_SECRET") as String?) ?: ""
         buildConfigField("String", "CF_ACCESS_CLIENT_ID", "\"$cfClientId\"")
         buildConfigField("String", "CF_ACCESS_CLIENT_SECRET", "\"$cfClientSecret\"")
+
+        // The VITURE SDK ships arm64 only and every supported phone is arm64 —
+        // shipping armeabi-v7a copies of the other native deps only inflates the
+        // APK the phone has to pull over Tailscale.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Compress the 30 MB of VITURE .so files in the APK: the self-updater
+            // downloads this file over a phone link, and install-time extraction is
+            // the cheaper end of that trade.
+            useLegacyPackaging = true
+        }
     }
 
     buildFeatures {

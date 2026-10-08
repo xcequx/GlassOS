@@ -29,26 +29,73 @@ object GlassesDisplay {
      */
     private const val UXSPACE_SCREEN_PREFIX = "uxspace-"
 
+    /**
+     * Why the last [find] returned what it did — plain language, shipped to the hub so a
+     * missing glasses screen says *which* of the phone's displays were seen instead.
+     */
+    @Volatile
+    var lastReason: String = "jeszcze nie sprawdzano"
+        private set
+
+    private var lastFingerprint: String = ""
+
     /** The glasses' display, or `null` when they are not connected. */
     fun find(context: Context): Display? {
         val displayManager =
             context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
 
-        Log.i(TAG, "displays visible to UxSpace:")
-        displayManager.displays.forEach {
-            Log.i(
-                TAG,
-                "  id=${it.displayId} '${it.name}' " +
-                    "${it.mode.physicalWidth}x${it.mode.physicalHeight} state=${it.state}",
-            )
+        val all = displayManager.displays.toList()
+        // find() runs on every hub heartbeat, so only log when the picture actually changes.
+        val fingerprint = all.joinToString("|") { "${it.displayId}:${it.name}:${it.state}" }
+        if (fingerprint != lastFingerprint) {
+            lastFingerprint = fingerprint
+            Log.i(TAG, "displays visible to UxSpace:")
+            all.forEach {
+                Log.i(
+                    TAG,
+                    "  id=${it.displayId} '${it.name}' " +
+                        "${it.mode.physicalWidth}x${it.mode.physicalHeight} state=${it.state} " +
+                        "flags=0x${it.flags.toString(16)}",
+                )
+            }
         }
 
+        val ours = { d: Display -> d.name.startsWith(UXSPACE_SCREEN_PREFIX) }
         val glasses = displayManager
             .getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
-            .firstOrNull {
-                !it.name.startsWith(UXSPACE_SCREEN_PREFIX) && it.state != Display.STATE_OFF
-            }
-        Log.i(TAG, "glasses display: ${glasses?.let { "id=${it.displayId} '${it.name}'" } ?: "none"}")
-        return glasses
+            .firstOrNull { !ours(it) && it.state != Display.STATE_OFF }
+        if (glasses != null) {
+            val reason = "ekran prezentacyjny '${glasses.name}' (id=${glasses.displayId})"
+            if (reason != lastReason) Log.i(TAG, "glasses display: $reason")
+            lastReason = reason
+            return glasses
+        }
+
+        // No presentation-category display. On Samsung this is what DeX / screen mirroring
+        // looks like: the external panel exists but the system owns it. Presenting on it
+        // still works often enough to be worth the attempt — and if it doesn't, the reason
+        // recorded here is the answer the user needs.
+        val external = all.firstOrNull {
+            it.displayId != Display.DEFAULT_DISPLAY &&
+                !ours(it) &&
+                it.state != Display.STATE_OFF
+        }
+        val reason = when {
+            external != null ->
+                "awaryjnie: ekran '${external.name}' (id=${external.displayId}) bez flagi " +
+                    "PRESENTATION — prawdopodobnie DeX / dublowanie ekranu"
+            all.none { it.displayId != Display.DEFAULT_DISPLAY && !ours(it) } ->
+                "telefon widzi tylko własny ekran — brak obrazu z USB-C (DisplayPort)"
+            else ->
+                "zewnętrzny ekran jest wyłączony (state=OFF)"
+        }
+        if (reason != lastReason) {
+            Log.i(
+                TAG,
+                "glasses display: ${external?.let { "fallback id=${it.displayId}" } ?: "none"} — $reason",
+            )
+        }
+        lastReason = reason
+        return external
     }
 }

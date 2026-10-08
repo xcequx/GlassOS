@@ -59,6 +59,10 @@ class WorkspaceRenderer(
          * layout-restore paths). Null means pick the screen under the cursor at launch.
          */
         val screenIdx: Int? = null,
+        /** Intent to open instead of the launcher entry (remote desktop, web page). */
+        val intent: WorkspaceController.LaunchIntent? = null,
+        /** Open straight into FULLSCREEN on a slot-sized display ("monitor" window). */
+        val monitor: Boolean = false,
     )
 
     /** Apps currently launched per screen of the active layout, keyed by screen index. */
@@ -383,8 +387,10 @@ class WorkspaceRenderer(
         activityName: String,
         label: String,
         screenIdx: Int? = null,
+        intent: WorkspaceController.LaunchIntent? = null,
+        monitor: Boolean = false,
     ) {
-        pendingApps.add(AppRequest(packageName, activityName, label, screenIdx))
+        pendingApps.add(AppRequest(packageName, activityName, label, screenIdx, intent, monitor))
         Log.i(
             "UxSpace/Launch",
             "3) renderer.requestApp pkg=$packageName slot=$screenIdx enqueued (pending=${pendingApps.size})",
@@ -542,6 +548,23 @@ class WorkspaceRenderer(
      * via [WorkspaceController.desktopContent] — each screen is a fully independent UxSpace
      * environment (own wallpaper, drawer, taskbar). GL thread only.
      */
+    /** True when any desktop screen is still backed by an untrusted display. */
+    fun hasUntrustedScreens(): Boolean {
+        val all = listOfNotNull(desktop) + extraScreens
+        return all.isNotEmpty() && all.any { !it.isTrusted }
+    }
+
+    /**
+     * Rebuild every desktop screen against the (now available) privileged helper.
+     * Called when the helper reaches READY after the workspace already came up.
+     */
+    fun rebuildScreens() {
+        glTasks.add {
+            Log.i(TAG, "rebuildScreens: helper is READY — recreating screens as trusted")
+            syncScreens(layout.screens.size)
+        }
+    }
+
     private fun syncScreens(screenCount: Int) {
         val factory = WorkspaceController.desktopContent
         if (factory == null) {
@@ -838,6 +861,163 @@ class WorkspaceRenderer(
         cursorClickPending = true
         noteInput()
     }
+
+    // region Real mouse pointer into app windows
+
+    /** Published every frame by [updatePointerTarget]; read by the main thread on button events. */
+    @Volatile var pointerTarget: WorkspaceController.PointerTarget? = null
+        private set
+
+    /** Last pointer position actually sent to an app, to skip duplicate hover frames. */
+    private var pointerSentDisplay = -1
+    private var pointerSentX = -1
+    private var pointerSentY = -1
+
+    /**
+     * Window that has captured the mouse (a button went down inside its activity
+     * area). While set, motion streams to this window as MOVE-with-button even when
+     * the cursor leaves its rectangle, exactly like a desktop drag. Cleared on the
+     * last button release. Written on the main thread, read on the GL thread.
+     */
+    @Volatile private var mouseCapturePackage: String? = null
+    @Volatile private var mouseCaptureDisplay: Int = -1
+    @Volatile private var mouseCaptureButtons: Int = 0
+    @Volatile private var mouseCaptureX: Int = 0
+    @Volatile private var mouseCaptureY: Int = 0
+
+    /** Hover frames only flow while a physical mouse / touchpad was active recently. */
+    @Volatile private var physicalMouseUntilMs: Long = 0L
+
+    fun notePhysicalMouse() {
+        physicalMouseUntilMs = android.os.SystemClock.uptimeMillis() + PHYSICAL_MOUSE_HOLD_MS
+    }
+
+    /**
+     * Main-thread entry for a physical mouse button. Press: if the pointer sits in an
+     * app's activity area, capture that window and inject a real button press there.
+     * Release: if a window holds the capture, inject the release at the last streamed
+     * position. Returns true when the event went to an app.
+     */
+    fun mouseButton(buttons: Int, pressed: Boolean): Boolean {
+        if (!WorkspaceController.pointerToAppsEnabled) return false
+        val mouse = WorkspaceController.appMouse ?: return false
+        if (pressed) {
+            val captured = mouseCapturePackage
+            if (captured != null) {
+                // Second button while the first is held — same window, same stream.
+                mouseCaptureButtons = mouseCaptureButtons or buttons
+                mouse(mouseCaptureDisplay, mouseCaptureX, mouseCaptureY, MOUSE_PRESS, buttons)
+                return true
+            }
+            val target = pointerTarget ?: return false
+            mouseCapturePackage = target.packageName
+            mouseCaptureDisplay = target.displayId
+            mouseCaptureButtons = buttons
+            mouseCaptureX = target.x
+            mouseCaptureY = target.y
+            pointerSentDisplay = target.displayId
+            pointerSentX = target.x
+            pointerSentY = target.y
+            mouse(target.displayId, target.x, target.y, MOUSE_PRESS, buttons)
+            noteInput()
+            return true
+        }
+        if (mouseCapturePackage == null) return false
+        mouseCaptureButtons = mouseCaptureButtons and buttons.inv()
+        mouse(mouseCaptureDisplay, mouseCaptureX, mouseCaptureY, MOUSE_RELEASE, buttons)
+        if (mouseCaptureButtons == 0) mouseCapturePackage = null
+        noteInput()
+        return true
+    }
+
+    /**
+     * GL-thread, once per frame: work out which app window (if any) the cursor is
+     * over and where inside its display, publish it for the button path, and stream
+     * hover / drag motion to the app while a physical mouse is active.
+     */
+    private fun updatePointerTarget() {
+        val mouse = WorkspaceController.appMouse
+        val captured = mouseCapturePackage
+        if (captured != null) {
+            // Drag in flight: project the cursor onto the captured window's slot
+            // (clamped), ignore everything else. Lost windows end the capture.
+            val window = runningWindows.firstOrNull { it.packageName == captured }
+            val displayId = window?.displayId
+            val slot = window?.let { layout.screens.getOrNull(it.slotIdx) }
+            if (window == null || displayId == null || slot == null) {
+                mouseCapturePackage = null
+                pointerTarget = null
+                return
+            }
+            val px = cursorToRectPx(slot) ?: return
+            val act = window.activityRect()
+            val uF = ((px[0] - act[0]) / act[2].toFloat()).coerceIn(0f, 1f)
+            val vF = ((px[1] - act[1]) / act[3].toFloat()).coerceIn(0f, 1f)
+            val x = (uF * (window.ui.width - 1)).toInt()
+            val y = (vF * (window.ui.height - 1)).toInt()
+            mouseCaptureX = x
+            mouseCaptureY = y
+            pointerTarget = WorkspaceController.PointerTarget(displayId, x, y, captured)
+            if (mouse != null && (x != pointerSentX || y != pointerSentY || displayId != pointerSentDisplay)) {
+                pointerSentDisplay = displayId
+                pointerSentX = x
+                pointerSentY = y
+                mouse(displayId, x, y, MOUSE_MOVE, mouseCaptureButtons)
+            }
+            return
+        }
+        if (dragWindow != null || resizeWindow != null || WorkspaceController.armedDrawerDrag != null) {
+            pointerTarget = null
+            return
+        }
+        val screenIdx = screenIndexUnderCursor()
+        val screen = screenIdx?.let { layout.screens.getOrNull(it) }
+        val px = screen?.let { cursorToRectPx(it) }
+        if (screenIdx == null || screen == null || px == null) {
+            pointerTarget = null
+            return
+        }
+        val modalOpen = (
+            WorkspaceController.isDrawerOpen && WorkspaceController.drawerOnScreen == screenIdx
+            ) || (
+            WorkspaceController.isSettingsOpen && WorkspaceController.settingsOnScreen == screenIdx
+            ) || (
+            WorkspaceController.isAudioOpen && WorkspaceController.audioOnScreen == screenIdx
+            )
+        if (modalOpen) {
+            pointerTarget = null
+            return
+        }
+        val window = windowOnSlotAt(screenIdx, px[0], px[1])
+        val displayId = window?.displayId
+        if (window == null || displayId == null) {
+            pointerTarget = null
+            return
+        }
+        val cr = window.chromeOverlayRect(screen.contentWidthPx)
+        val inChrome = px[0] >= cr[0] && px[0] < cr[0] + cr[2] &&
+            px[1] >= cr[1] && px[1] < cr[1] + cr[3]
+        if (inChrome) {
+            pointerTarget = null
+            return
+        }
+        val act = window.activityRect()
+        val uF = ((px[0] - act[0]) / act[2].toFloat()).coerceIn(0f, 1f)
+        val vF = ((px[1] - act[1]) / act[3].toFloat()).coerceIn(0f, 1f)
+        val x = (uF * (window.ui.width - 1)).toInt()
+        val y = (vF * (window.ui.height - 1)).toInt()
+        pointerTarget = WorkspaceController.PointerTarget(displayId, x, y, window.packageName)
+        val hoverOn = WorkspaceController.pointerToAppsEnabled && mouse != null &&
+            android.os.SystemClock.uptimeMillis() < physicalMouseUntilMs
+        if (hoverOn && (x != pointerSentX || y != pointerSentY || displayId != pointerSentDisplay)) {
+            pointerSentDisplay = displayId
+            pointerSentX = x
+            pointerSentY = y
+            mouse!!(displayId, x, y, MOUSE_HOVER, 0)
+        }
+    }
+
+    // endregion
 
     @Volatile private var rightClickPending = false
 
@@ -1215,7 +1395,9 @@ class WorkspaceRenderer(
             handlePinch(pendingPinch)
             pendingPinch = 1f
         }
-        drawToolbar()
+        updatePointerTarget()
+        // In-view HUD toolbar is disabled: it sat on top of the desktop taskbar
+        // (a second bottom bar the cursor could not enter). Phone + hub have the controls.
         drawRecordingIndicator()
         if (WorkspaceController.legendVisible) drawLegend()
         drawLayoutAnnouncement()
@@ -1461,8 +1643,13 @@ class WorkspaceRenderer(
         val outer = AppWindow.computeOuterBounds(
             slotScreen.contentWidthPx, slotScreen.contentHeightPx, WINDOW_TASKBAR_PX,
         )
-        val activityW = outer[2]
-        val activityH = (outer[3] - WINDOW_CHROME_PX).coerceAtLeast(AppWindow.MIN_USABLE_HEIGHT_PX)
+        // A "monitor" window (remote desktop) gets a bare display the size of the
+        // whole slot — 1920×1080 on every stock layout — and opens in FULLSCREEN,
+        // so the remote machine negotiates the slot's native resolution and its
+        // frames land 1:1 on the glasses screen.
+        val activityW = if (request.monitor) slotScreen.contentWidthPx else outer[2]
+        val activityH = if (request.monitor) slotScreen.contentHeightPx
+        else (outer[3] - WINDOW_CHROME_PX).coerceAtLeast(AppWindow.MIN_USABLE_HEIGHT_PX)
         val ui = UiScreen(
             createExternalTexture(),
             activityW, activityH,
@@ -1476,11 +1663,19 @@ class WorkspaceRenderer(
             label = request.label,
             slotIdx = targetIdx,
             chromePx = WINDOW_CHROME_PX,
+            intent = request.intent,
+            monitor = request.monitor,
         )
         window.xPx = outer[0]
         window.yPx = outer[1]
         window.widthPx = outer[2]
         window.heightPx = outer[3]
+        if (request.monitor) {
+            window.setState(
+                WorkspaceController.WindowMode.FULLSCREEN,
+                slotScreen.contentWidthPx, slotScreen.contentHeightPx, WINDOW_TASKBAR_PX,
+            )
+        }
         runningWindows.add(window)
         notifyWindowBoundsForSlot(targetIdx)
         // Bring the bare trusted display up on the main thread, then launch the
@@ -1507,9 +1702,16 @@ class WorkspaceRenderer(
                 "UxSpace/Launch",
                 "6) registered window display=$displayId pkg=${window.packageName}",
             )
-            WorkspaceController.appLauncher?.invoke(
-                displayId, window.packageName, window.activityName,
-            )
+            val intent = window.intent
+            if (intent != null) {
+                WorkspaceController.intentLauncher?.invoke(
+                    displayId, window.packageName, window.activityName, intent,
+                )
+            } else {
+                WorkspaceController.appLauncher?.invoke(
+                    displayId, window.packageName, window.activityName,
+                )
+            }
             WorkspaceController.notifyAppLaunchedOnScreen(
                 window.packageName, window.label, window.slotIdx,
             )
@@ -1520,7 +1722,14 @@ class WorkspaceRenderer(
             return
         }
         if (attempt >= LAUNCH_DISPLAY_WAIT_ATTEMPTS) {
-            Log.e(TAG, "addWindow: bare display never came up for ${window.packageName}")
+            Log.e(TAG, "addWindow: bare display never came up for ${window.packageName} — dropping empty chrome")
+            glTasks.add {
+                runningWindows.remove(window)
+                window.ui.release()
+            }
+            mainHandler.post {
+                WorkspaceController.announceInView("Aplikacja nie wstała — potrzeba ADB", 4_000L)
+            }
             return
         }
         mainHandler.postDelayed(
@@ -1617,7 +1826,12 @@ class WorkspaceRenderer(
             runningWindows.remove(window)
             window.release()
             closeAndNotify(pkg)
-            pendingApps.add(AppRequest(pkg, activityName, label, screenIdx = dstSlot))
+            pendingApps.add(
+                AppRequest(
+                    pkg, activityName, label, screenIdx = dstSlot,
+                    intent = window.intent, monitor = window.monitor,
+                ),
+            )
             notifyWindowBoundsForSlot(srcSlot)
             Log.i(
                 TAG,
@@ -3872,6 +4086,15 @@ class WorkspaceRenderer(
     }
 
     private companion object {
+        /** [WorkspaceController.appMouse] action codes (mirror PrivilegedService). */
+        const val MOUSE_HOVER = 0
+        const val MOUSE_PRESS = 1
+        const val MOUSE_RELEASE = 2
+        const val MOUSE_MOVE = 3
+
+        /** How long after the last raw mouse delta hover frames keep streaming to apps. */
+        const val PHYSICAL_MOUSE_HOLD_MS = 2_500L
+
         const val TAG = "UxSpace/Renderer"
 
         /** Gallery album (under Pictures/) that one-shot workspace snapshots are saved into. */

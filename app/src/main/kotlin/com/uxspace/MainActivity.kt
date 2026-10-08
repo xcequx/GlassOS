@@ -39,7 +39,11 @@ import com.uxspace.apps.AppCache
 import com.uxspace.desktop.DesktopWallpaperStore
 import com.uxspace.desktop.WallpaperSource
 import com.uxspace.glasses.GlassesDevice
+import com.uxspace.desktop.WorkspaceSettings
+import com.uxspace.diag.Diagnostics
 import com.uxspace.glasses.GlassesDisplay
+import com.uxspace.glasses.GlassesUsb
+import com.uxspace.glasses.NativeGlasses
 import com.uxspace.phone.ControlTab
 import com.uxspace.phone.GlassOsApp
 import com.uxspace.phone.PanelScene
@@ -314,8 +318,9 @@ class MainActivity : ComponentActivity() {
             isSingleLine = false
         }
         ai = AiController(this, panel)
-        hub = HubClient(panel) { layout, pinned ->
+        hub = HubClient(this, panel) { layout, pinned ->
             WorkspaceController.setLayout(layout)
+            WorkspaceSettings.setLastLayout(layout)
             WorkspaceController.setViewMode(
                 if (pinned) WorkspaceRenderer.ViewMode.PINNED else WorkspaceRenderer.ViewMode.FREE,
             )
@@ -335,11 +340,12 @@ class MainActivity : ComponentActivity() {
                     onApplyWorkspace = { applyWorkspace(it) },
                     onLaunchApp = { app ->
                         val ok = WorkspaceController.launchApp(app.packageName, app.activityName, app.label)
-                        Toast.makeText(
-                            this,
-                            if (ok) "Na okularach: ${app.label}" else "Podłącz okulary",
-                            Toast.LENGTH_SHORT,
-                        ).show()
+                        val msg = when {
+                            ok -> "Na okularach: ${app.label}"
+                            !WorkspaceController.isRunning -> "Podłącz okulary"
+                            else -> "Aplikacje z telefonu na okularach wymagają ADB — pulpit GlassOS działa bez tego"
+                        }
+                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                     },
                     onBrightness = { level ->
                         GlassesDevice.setBrightness(level)
@@ -349,9 +355,14 @@ class MainActivity : ComponentActivity() {
                         GlassesDevice.setFilmLevel(percent)
                         panel.filmPercent = percent
                     },
+                    onToggleTaskbar = {
+                        val on = !panel.taskbarVisible
+                        panel.taskbarVisible = on
+                        WorkspaceController.setTaskbarVisible?.invoke(on)
+                    },
                     onToggle3d = {
                         val next = !panel.stereo3d
-                        GlassesDevice.switchDimension(next)
+                        setStereoSafely(next)
                         panel.stereo3d = next
                     },
                     onKeyboard = { toggleKeyboard() },
@@ -411,10 +422,26 @@ class MainActivity : ComponentActivity() {
         mainHandler.post(previewTick)
 
         WorkspaceController.retryHeadTracking = { mainHandler.post { attemptReconnectDof() } }
+        WorkspaceController.restartGlasses = { mainHandler.post { attemptGlassesReconnect() } }
+        WorkspaceController.setStereo = { on -> mainHandler.post { setStereoSafely(on) } }
+        WorkspaceController.setTaskbarVisible = { on ->
+            mainHandler.post {
+                WorkspaceSettings.setShowTaskbar(on)
+                WorkspaceController.announceInView(
+                    if (on) "Pasek zadań włączony" else "Pasek zadań schowany",
+                    2_000L,
+                )
+            }
+        }
         WorkspaceController.addRecordingListener(recordingListener)
         WorkspaceController.addZoomListener(zoomHudListener)
         renderToolbarStates()
-        WorkspaceController.addDofListener { mainHandler.post { renderToolbarStates() } }
+        WorkspaceController.addDofListener { active ->
+            mainHandler.post {
+                if (active) WorkspaceController.autoUnlockOnTracking()
+                renderToolbarStates()
+            }
+        }
         WorkspaceController.addViewModeListener {
             mainHandler.post { renderToolbarStates() }
         }
@@ -614,6 +641,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         panel.layout = WorkspaceController.layout
+        WorkspaceSettings.setLastLayout(WorkspaceController.layout)
         panel.viewModePinned =
             WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.PINNED
         WorkspaceController.announceInView(preset.label)
@@ -639,7 +667,7 @@ class MainActivity : ComponentActivity() {
             WorkspaceRenderer.ViewMode.PINNED -> WorkspaceRenderer.ViewMode.FREE
             WorkspaceRenderer.ViewMode.FREE -> WorkspaceRenderer.ViewMode.PINNED
         }
-        WorkspaceController.setViewMode(next)
+        WorkspaceController.setViewMode(next, byUser = true)
         panel.viewModePinned = next == WorkspaceRenderer.ViewMode.PINNED
         renderToolbarStates()
         Toast.makeText(
@@ -922,8 +950,13 @@ class MainActivity : ComponentActivity() {
     private fun displayManager(): DisplayManager =
         getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
 
+    /** Retries a workspace that didn't come up on the first try (connect races, DeX blips). */
+    private val workspaceRetry = Runnable { syncGlasses() }
+    private var workspaceRetries = 0
+
     /** Show the workspace on the glasses while they are connected; refresh the active scene. */
     private fun syncGlasses() {
+        mainHandler.removeCallbacks(workspaceRetry)
         val display = GlassesDisplay.find(this)
         if (display != null) {
             val current = presentation
@@ -937,23 +970,130 @@ class MainActivity : ComponentActivity() {
                     // Common during a glasses connect/disconnect race — the display
                     // briefly exists but isn't trusted yet; the next syncGlasses retry
                     // succeeds. Don't log a full stack trace as if it were a crash.
-                    Log.w("UxSpace/Main", "presentation rejected (display not trusted yet): ${e.message}")
+                    Diagnostics.w(
+                        "UxSpace/Main",
+                        "ekran okularów jeszcze nie zaufany: ${e.message}",
+                    )
                     null
                 } catch (e: Exception) {
-                    Log.e("UxSpace/Main", "could not show workspace on the glasses", e)
+                    Diagnostics.e("UxSpace/Main", "nie udało się pokazać pulpitu w okularach", e)
                     null
                 }
+            }
+            if (presentation == null) {
+                // Keep trying for a while instead of waiting for the next display event —
+                // on a cold plug-in the first attempt lands before the display is usable.
+                workspaceRetries += 1
+                Diagnostics.workspaceError =
+                    "ekran jest, ale pulpit nie wstał (próba $workspaceRetries) · " +
+                        GlassesDisplay.lastReason
+                if (workspaceRetries <= WORKSPACE_RETRY_LIMIT) {
+                    mainHandler.postDelayed(workspaceRetry, WORKSPACE_RETRY_DELAY_MS)
+                }
+            } else {
+                if (workspaceRetries != 0 || !layoutRestored) restoreLastLayout()
+                workspaceRetries = 0
+                Diagnostics.workspaceError = ""
+                Diagnostics.displayPick = GlassesDisplay.lastReason
+                repairDegradedLink(display)
             }
             // Foreground service brackets the glasses session — its onDestroy is the
             // safety net that force-stops launched apps if the activity is taken away
             // without the presentation's own dismiss cleanup running first.
-            setWorkspaceServiceRunning(presentation != null)
+            setWorkspaceServiceRunning(true)
         } else {
             presentation?.dismiss()
             presentation = null
-            setWorkspaceServiceRunning(false)
+            workspaceRetries = 0
+            Diagnostics.workspaceError = GlassesDisplay.lastReason
+            Diagnostics.displayPick = GlassesDisplay.lastReason
+            // Keep the session (and with it the hub link) alive as long as the glasses are
+            // on USB, even with no picture yet: Android 16 freezes a backgrounded app
+            // within about a minute, and a frozen GlassOS is a phone that silently drops
+            // off the hub mid-session.
+            setWorkspaceServiceRunning(GlassesUsb.isConnected(this))
         }
         renderStatus()
+    }
+
+    private var layoutRestored = false
+
+    /**
+     * Flip 2D / 3D and make sure the glasses survive it.
+     *
+     * A mode switch re-negotiates the video link. If the display does not come back within
+     * [STEREO_WATCH_MS] we put 1080p60 back and say so out loud — the alternative, which is
+     * what the plain SDK toggle did, is a black pair of glasses and no explanation.
+     */
+    private fun setStereoSafely(on: Boolean) {
+        val rc = GlassesDevice.setStereo(on)
+        panel.stereo3d = on
+        Diagnostics.i("UxSpace/Main", "tryb ${if (on) "3D SBS" else "2D"} (rc=$rc)")
+        mainHandler.postDelayed({
+            if (GlassesDisplay.find(this) != null) {
+                syncGlasses()
+                return@postDelayed
+            }
+            Diagnostics.w("UxSpace/Main", "po zmianie trybu nie ma obrazu — wracam do 2D 1080p60")
+            GlassesDevice.setMode1080p60()
+            panel.stereo3d = false
+            mainHandler.postDelayed({
+                syncGlasses()
+                if (GlassesDisplay.find(this) == null) {
+                    panel.statusLine = "Okulary nie wróciły po zmianie trybu — odepnij i wepnij USB-C"
+                    Toast.makeText(
+                        this,
+                        "Okulary zgasły po zmianie trybu. Odepnij i wepnij kabel USB-C.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }, STEREO_WATCH_MS)
+        }, STEREO_WATCH_MS)
+    }
+
+    /**
+     * Bring back the layout the user last chose. Without this every reconnect drops them
+     * to a single screen, which reads as "the screens I set up are gone".
+     */
+    private fun restoreLastLayout() {
+        layoutRestored = true
+        val saved = WorkspaceSettings.lastLayout()
+        if (saved == WorkspaceController.layout) return
+        WorkspaceController.setLayout(saved)
+        panel.layout = saved
+        Diagnostics.i("UxSpace/Main", "przywracam układ ${saved.name}")
+    }
+
+    /** Display id whose video mode we already tried to repair, so we ask at most once. */
+    private var linkRepairedFor: Int = -1
+
+    /**
+     * A glasses display that comes up at 640×480 means the DisplayPort link fell back.
+     * Ask the SDK for 1080p60 once per display; without the SDK there is nothing to ask,
+     * and we just record the state for the hub.
+     */
+    private fun repairDegradedLink(display: android.view.Display) {
+        val width = display.mode.physicalWidth
+        if (width <= 0 || width >= 1280) {
+            linkRepairedFor = -1
+            return
+        }
+        if (linkRepairedFor == display.displayId) return
+        linkRepairedFor = display.displayId
+        if (!NativeGlasses.libraryLoaded) {
+            Diagnostics.w(
+                "UxSpace/Main",
+                "okulary na ${width}px — link DP spadł, a bez SDK nie ma jak tego zmienić",
+            )
+            return
+        }
+        val rc = GlassesDevice.setMode1080p60()
+        Diagnostics.w(
+            "UxSpace/Main",
+            "okulary zgłosiły ${width}×${display.mode.physicalHeight} — proszę SDK o 1080p60 (rc=$rc)",
+        )
+        // The mode switch re-enumerates the display; come back and re-attach to it.
+        mainHandler.postDelayed(workspaceRetry, 2_000L)
     }
 
     private var workspaceServiceRunning = false
@@ -987,6 +1127,7 @@ class MainActivity : ComponentActivity() {
      * never blocks the trackpad, hub, or glasses desktop.
      */
     private fun renderStatus() {
+        WorkspaceController.privilegedReady = PrivilegedService.state == State.READY
         panel.applyPrivilege(PrivilegedService.state)
         panel.scene = when {
             !panel.skipPrivilege && PrivilegedService.state != State.READY -> PanelScene.SETUP
@@ -1223,6 +1364,15 @@ class MainActivity : ComponentActivity() {
          *  up; if [WorkspaceController.headTrackingActive] is still false we report the
          *  reconnect failed. Long enough to cover SDK re-init + Carina VIO warm-up. */
         const val DOF_RECONNECT_TIMEOUT_MS = 8_000L
+
+        /** Retry cadence for a glasses display that exists but won't take the workspace
+         *  yet (plug-in race, DeX handover). Eight tries ≈ 12 s, then we stop and let the
+         *  reported reason speak for itself. */
+        const val WORKSPACE_RETRY_DELAY_MS = 1_500L
+        const val WORKSPACE_RETRY_LIMIT = 8
+
+        /** How long to wait for the video link after a 2D/3D switch before rescuing it. */
+        const val STEREO_WATCH_MS = 3_000L
 
         /** Delay between a real keyboard appearing and the proactive glasses USB
          *  rescan. ~1.5s lets the BT pairing's peak USB churn finish before we
